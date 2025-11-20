@@ -1,0 +1,18 @@
+[build-system]
+requires = [
+    "setuptools>=61",
+    "wheel",
+    "torch"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "detectron2"
+version = "0.0.0"  # overwritten by setup.py get_version()
+description = "Detectron2"
+requires-python = ">=3.8"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+include-package-data = true
+packages = { find = {} }

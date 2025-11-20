@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# Copyright (c) Facebook, Inc. and its affiliates.
 
 import glob
 import os
@@ -7,12 +6,6 @@ import shutil
 from os import path
 from setuptools import find_packages, setup
 from typing import List
-import torch
-from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension
-from torch.utils.hipify import hipify_python
-
-torch_ver = [int(x) for x in torch.__version__.split(".")[:2]]
-assert torch_ver >= [1, 6], "Requires PyTorch >= 1.6"
 
 
 def get_version():
@@ -21,13 +14,11 @@ def get_version():
     version_line = [l.strip() for l in init_py if l.startswith("__version__")][0]
     version = version_line.split("=")[-1].strip().strip("'\"")
 
-    # The following is used to build release packages.
-    # Users should never use it.
     suffix = os.getenv("D2_VERSION_SUFFIX", "")
     version = version + suffix
+
     if os.getenv("BUILD_NIGHTLY", "0") == "1":
         from datetime import datetime
-
         date_str = datetime.today().strftime("%y%m%d")
         version = version + ".dev" + date_str
 
@@ -38,14 +29,43 @@ def get_version():
     return version
 
 
+def get_model_zoo_configs() -> List[str]:
+    source_configs_dir = path.join(path.dirname(path.realpath(__file__)), "projects", "ISTR", "configs")
+    destination = path.join(
+        path.dirname(path.realpath(__file__)), "detectron2", "model_zoo", "configs"
+    )
+    if path.exists(source_configs_dir):
+        if path.islink(destination):
+            os.unlink(destination)
+        elif path.isdir(destination):
+            shutil.rmtree(destination)
+
+    if not path.exists(destination):
+        try:
+            os.symlink(source_configs_dir, destination)
+        except OSError:
+            shutil.copytree(source_configs_dir, destination)
+
+    config_paths = glob.glob("configs/**/*.yaml", recursive=True)
+    return config_paths
+
+
 def get_extensions():
+    # we import torch only inside the build step, not at metadata time
+    import torch
+    from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension
+    from torch.utils.hipify import hipify_python
+    from torch.utils.cpp_extension import ROCM_HOME
+
+    torch_ver = [int(x) for x in torch.__version__.split(".")[:2]]
+    if torch_ver < [1, 6]:
+        raise RuntimeError("Requires PyTorch >= 1.6")
+
     this_dir = path.dirname(path.abspath(__file__))
     extensions_dir = path.join(this_dir, "detectron2", "layers", "csrc")
 
     main_source = path.join(extensions_dir, "vision.cpp")
     sources = glob.glob(path.join(extensions_dir, "**", "*.cpp"))
-
-    from torch.utils.cpp_extension import ROCM_HOME
 
     is_rocm_pytorch = (
         True if ((torch.version.hip is not None) and (ROCM_HOME is not None)) else False
@@ -57,14 +77,7 @@ def get_extensions():
         else [0, 0, 0]
     )
 
-    if is_rocm_pytorch and hipify_ver < [1, 0, 0]:  # TODO not needed since pt1.8
-
-        # Earlier versions of hipification and extension modules were not
-        # transparent, i.e. would require an explicit call to hipify, and the
-        # hipification would introduce "hip" subdirectories, possibly changing
-        # the relationship between source and header files.
-        # This path is maintained for backwards compatibility.
-
+    if is_rocm_pytorch and hipify_ver < [1, 0, 0]:
         hipify_python.hipify(
             project_directory=this_dir,
             output_directory=this_dir,
@@ -73,9 +86,8 @@ def get_extensions():
             is_pytorch_extension=True,
         )
 
-        source_cuda = glob.glob(path.join(extensions_dir, "**", "hip", "*.hip")) + glob.glob(
-            path.join(extensions_dir, "hip", "*.hip")
-        )
+        source_cuda = glob.glob(path.join(extensions_dir, "**", "hip", "*.hip")) + \
+                      glob.glob(path.join(extensions_dir, "hip", "*.hip"))
 
         shutil.copy(
             "detectron2/layers/csrc/box_iou_rotated/box_iou_rotated_utils.h",
@@ -88,30 +100,20 @@ def get_extensions():
 
         sources = [main_source] + sources
         sources = [
-            s
-            for s in sources
+            s for s in sources
             if not is_rocm_pytorch or torch_ver < [1, 7] or not s.endswith("hip/vision.cpp")
         ]
-
     else:
-
-        # common code between cuda and rocm platforms,
-        # for hipify version [1,0,0] and later.
-
-        source_cuda = glob.glob(path.join(extensions_dir, "**", "*.cu")) + glob.glob(
-            path.join(extensions_dir, "*.cu")
-        )
-
+        source_cuda = glob.glob(path.join(extensions_dir, "**", "*.cu")) + \
+                      glob.glob(path.join(extensions_dir, "*.cu"))
         sources = [main_source] + sources
 
     extension = CppExtension
-
     extra_compile_args = {"cxx": []}
     define_macros = []
 
-    if (torch.cuda.is_available() and ((CUDA_HOME is not None) or is_rocm_pytorch)) or os.getenv(
-        "FORCE_CUDA", "0"
-    ) == "1":
+    if (torch.cuda.is_available() and ((CUDA_HOME is not None) or is_rocm_pytorch)) or \
+       os.getenv("FORCE_CUDA", "0") == "1":
         extension = CUDAExtension
         sources += source_cuda
 
@@ -129,12 +131,16 @@ def get_extensions():
             extra_compile_args["nvcc"] = []
 
         if torch_ver < [1, 7]:
-            # supported by https://github.com/pytorch/pytorch/pull/43931
             CC = os.environ.get("CC", None)
             if CC is not None:
                 extra_compile_args["nvcc"].append("-ccbin={}".format(CC))
 
     include_dirs = [extensions_dir]
+
+    # convert all paths to be relative to project root for setuptools
+    proj_root = this_dir
+    sources = [os.path.relpath(s, proj_root).replace(os.sep, "/") for s in sources]
+    include_dirs = [os.path.relpath(d, proj_root).replace(os.sep, "/") for d in include_dirs]
 
     ext_modules = [
         extension(
@@ -145,43 +151,9 @@ def get_extensions():
             extra_compile_args=extra_compile_args,
         )
     ]
-
     return ext_modules
 
 
-def get_model_zoo_configs() -> List[str]:
-    """
-    Return a list of configs to include in package for model zoo. Copy over these configs inside
-    detectron2/model_zoo.
-    """
-
-    # Use absolute paths while symlinking.
-    source_configs_dir = path.join(path.dirname(path.realpath(__file__)), "configs")
-    destination = path.join(
-        path.dirname(path.realpath(__file__)), "detectron2", "model_zoo", "configs"
-    )
-    # Symlink the config directory inside package to have a cleaner pip install.
-
-    # Remove stale symlink/directory from a previous build.
-    if path.exists(source_configs_dir):
-        if path.islink(destination):
-            os.unlink(destination)
-        elif path.isdir(destination):
-            shutil.rmtree(destination)
-
-    if not path.exists(destination):
-        try:
-            os.symlink(source_configs_dir, destination)
-        except OSError:
-            # Fall back to copying if symlink fails: ex. on Windows.
-            shutil.copytree(source_configs_dir, destination)
-
-    config_paths = glob.glob("configs/**/*.yaml", recursive=True)
-    return config_paths
-
-
-# For projects that are relative small and provide features that are very close
-# to detectron2's core functionalities, we install them under detectron2.projects
 PROJECTS = {
     "detectron2.projects.ISTR": "projects/ISTR/istr",
 }
@@ -189,38 +161,27 @@ PROJECTS = {
 setup(
     name="detectron2",
     version=get_version(),
-    author="FAIR",
     url="https://github.com/facebookresearch/detectron2",
-    description="Detectron2 is FAIR's next-generation research "
-    "platform for object detection and segmentation.",
+    description="Detectron2",
     packages=find_packages(exclude=("configs", "tests*")) + list(PROJECTS.keys()),
     package_dir=PROJECTS,
     package_data={"detectron2.model_zoo": get_model_zoo_configs()},
-    python_requires=">=3.6",
+    python_requires=">=3.8",
     install_requires=[
-        # Do not add opencv here. Just like pytorch, user should install
-        # opencv themselves, preferrably by OS's package manager, or by
-        # choosing the proper pypi package name at https://github.com/skvark/opencv-python
         "termcolor>=1.1",
-        "Pillow>=7.1",  # or use pillow-simd for better performance
+        "Pillow>=7.1",
         "yacs>=0.1.6",
         "tabulate",
         "cloudpickle",
         "matplotlib",
         "tqdm>4.29.0",
         "tensorboard",
-        # Lock version of fvcore/iopath because they may have breaking changes
-        # NOTE: when updating fvcore/iopath version, make sure fvcore depends
-        # on the same version of iopath.
-        "fvcore>=0.1.5,<0.1.6",  # required like this to make it pip installable
+        "fvcore>=0.1.5,<0.1.6",
         "iopath>=0.1.7,<0.1.8",
-        "pycocotools>=2.0.2",  # corresponds to https://github.com/ppwwyyxx/cocoapi
-        "future",  # used by caffe2
-        "pydot",  # used to save caffe2 SVGs
-        "dataclasses; python_version<'3.7'",
-        "omegaconf==2.1.0.dev22",
-        # When adding to the list, may need to update docs/requirements.txt
-        # or add mock in docs/conf.py
+        "pycocotools>=2.0.2",
+        "future",
+        "pydot",
+        "omegaconf>=2.1.0.dev22",
     ],
     extras_require={
         "all": [
@@ -238,5 +199,5 @@ setup(
         ],
     },
     ext_modules=get_extensions(),
-    cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension},
+    cmdclass={"build_ext": __import__("torch.utils.cpp_extension", fromlist=["BuildExtension"]).BuildExtension},
 )
