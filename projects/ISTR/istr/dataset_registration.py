@@ -50,6 +50,12 @@ def register_dataset_from_args(dataset_name, json_file, image_root, **kwargs):
     if not os.path.exists(image_root):
         raise FileNotFoundError(f"Image directory not found: {image_root}")
     
+    # Check if dataset is already registered
+    if dataset_name in DatasetCatalog.list():
+        print(f"WARNING: Dataset '{dataset_name}' is already registered. Skipping registration.")
+        print(f"  If you want to re-register, use a different name with --train-name or --test-name")
+        return
+    
     # Extract metadata from kwargs
     metadata = {k: v for k, v in kwargs.items() if k not in ['dataset_name', 'json_file', 'image_root']}
     

@@ -105,8 +105,11 @@ def setup(args):
         if not hasattr(args, 'train_images') or not args.train_images:
             raise ValueError("--train-json requires --train-images to be specified")
         
-        # Determine dataset name from config or use default
-        train_name = cfg.DATASETS.TRAIN[0] if cfg.DATASETS.TRAIN else "custom_train"
+        # Use custom name if provided, otherwise generate a safe name
+        if hasattr(args, 'train_name') and args.train_name:
+            train_name = args.train_name
+        else:
+            train_name = f"{args.train_images.split('/')[-3]}_train"
         
         # Register the training dataset
         register_dataset_from_args(train_name, args.train_json, args.train_images)
@@ -121,8 +124,11 @@ def setup(args):
         if not hasattr(args, 'test_images') or not args.test_images:
             raise ValueError("--test-json requires --test-images to be specified")
         
-        # Determine dataset name from config or use default
-        test_name = cfg.DATASETS.TEST[0] if cfg.DATASETS.TEST else "custom_test"
+        # Use custom name if provided, otherwise generate a safe name
+        if hasattr(args, 'test_name') and args.test_name:
+            test_name = args.test_name
+        else:
+            test_name = f"{args.train_images.split('/')[-3]}_test"
         
         # Register the test dataset
         register_dataset_from_args(test_name, args.test_json, args.test_images)
@@ -170,6 +176,12 @@ if __name__ == "__main__":
         help="Path to directory containing training images"
     )
     parser.add_argument(
+        "--train-name",
+        type=str,
+        default="",
+        help="Custom name for training dataset (default: my_dataset_train)"
+    )
+    parser.add_argument(
         "--test-json",
         type=str,
         default="",
@@ -180,6 +192,12 @@ if __name__ == "__main__":
         type=str,
         default="",
         help="Path to directory containing test images"
+    )
+    parser.add_argument(
+        "--test-name",
+        type=str,
+        default="",
+        help="Custom name for test dataset (default: my_dataset_test)"
     )
     
     args = parser.parse_args()
