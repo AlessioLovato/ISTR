@@ -65,3 +65,9 @@ def add_ISTR_config(cfg):
 
     cfg.MODEL.ISTR.PATH_COMPONENTS = ''
     cfg.MODEL.ISTR.MASK_ENCODING_METHOD = 'AE'
+    
+    # Custom dataset paths
+    cfg.DATASETS.TRAIN_JSON = ""
+    cfg.DATASETS.TRAIN_IMAGES = ""
+    cfg.DATASETS.TEST_JSON = ""
+    cfg.DATASETS.TEST_IMAGES = ""

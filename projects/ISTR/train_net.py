@@ -13,7 +13,7 @@ from detectron2.engine import AutogradProfiler, DefaultTrainer, default_argument
 from detectron2.evaluation import COCOEvaluator, CityscapesInstanceEvaluator, verify_results#, LVISEvaluator
 from detectron2.solver.build import maybe_add_gradient_clipping
 
-from istr import ISTRDatasetMapper, add_ISTR_config
+from istr import ISTRDatasetMapper, add_ISTR_config, register_dataset_from_args
 
 
 class Trainer(DefaultTrainer):
@@ -99,6 +99,39 @@ def setup(args):
     add_ISTR_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
+    
+    # Register custom datasets if provided via command line
+    if hasattr(args, 'train_json') and args.train_json:
+        if not hasattr(args, 'train_images') or not args.train_images:
+            raise ValueError("--train-json requires --train-images to be specified")
+        
+        # Determine dataset name from config or use default
+        train_name = cfg.DATASETS.TRAIN[0] if cfg.DATASETS.TRAIN else "custom_train"
+        
+        # Register the training dataset
+        register_dataset_from_args(train_name, args.train_json, args.train_images)
+        
+        # Update config to use this dataset
+        cfg.defrost()
+        cfg.DATASETS.TRAIN = (train_name,)
+        cfg.freeze()
+    
+    # Register custom test dataset if provided
+    if hasattr(args, 'test_json') and args.test_json:
+        if not hasattr(args, 'test_images') or not args.test_images:
+            raise ValueError("--test-json requires --test-images to be specified")
+        
+        # Determine dataset name from config or use default
+        test_name = cfg.DATASETS.TEST[0] if cfg.DATASETS.TEST else "custom_test"
+        
+        # Register the test dataset
+        register_dataset_from_args(test_name, args.test_json, args.test_images)
+        
+        # Update config to use this dataset
+        cfg.defrost()
+        cfg.DATASETS.TEST = (test_name,)
+        cfg.freeze()
+    
     cfg.freeze()
     default_setup(cfg, args)
     return cfg
@@ -121,7 +154,35 @@ def main(args):
 
 
 if __name__ == "__main__":
-    args = default_argument_parser().parse_args()
+    parser = default_argument_parser()
+    
+    # Add custom dataset arguments
+    parser.add_argument(
+        "--train-json",
+        type=str,
+        default="",
+        help="Path to training dataset JSON file in COCO format"
+    )
+    parser.add_argument(
+        "--train-images",
+        type=str,
+        default="",
+        help="Path to directory containing training images"
+    )
+    parser.add_argument(
+        "--test-json",
+        type=str,
+        default="",
+        help="Path to test dataset JSON file in COCO format"
+    )
+    parser.add_argument(
+        "--test-images",
+        type=str,
+        default="",
+        help="Path to directory containing test images"
+    )
+    
+    args = parser.parse_args()
     print("Command Line Args:", args)
     launch(
         main,
