@@ -117,6 +117,8 @@ def setup(args):
         # Update config to use this dataset
         cfg.defrost()
         cfg.DATASETS.TRAIN = (train_name,)
+        cfg.WANDB_PROJECT = args.project_name
+        cfg.WANDB_RUN = args.run_name
         cfg.freeze()
     
     # Register custom test dataset if provided
@@ -198,6 +200,17 @@ if __name__ == "__main__":
         type=str,
         default="",
         help="Custom name for test dataset (default: my_dataset_test)"
+    )
+    parser.add_argument(
+        "--project-name",
+        type=str,
+        default="ISTR_models_first_trial",
+        help="WandB project name"
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        help="WandB run name"
     )
     
     args = parser.parse_args()
