@@ -13,7 +13,7 @@ DATASETS:
   TRAIN: ("coco-big-images-rev_train",)
   TEST:  ("coco-big-images-rev_val",)
 SOLVER:
-  STEPS: (17000, 20000)
+  STEPS: (17000, 19000)
   MAX_ITER: 20000
 INPUT:
   FORMAT: "RGB"
