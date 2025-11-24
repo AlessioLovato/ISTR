@@ -14,6 +14,7 @@ from detectron2.evaluation import COCOEvaluator, CityscapesInstanceEvaluator, ve
 from detectron2.solver.build import maybe_add_gradient_clipping
 
 from istr import ISTRDatasetMapper, add_ISTR_config, register_dataset_from_args
+from detectron2.data.datasets import register_coco_instances
 
 
 class Trainer(DefaultTrainer):
@@ -99,45 +100,26 @@ def setup(args):
     add_ISTR_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
+
+    cfg = get_cfg()
+    cfg.merge_from_file(args.config_file)
+    cfg.merge_from_list(args.opts)
+
+    # Register COCO datasets if specified in args
+    if hasattr(args, "dataset_folder") and args.dataset_folder:
+        train_path = args.dataset_folder + "/train"
+        val_path = args.dataset_folder + "/val"
+        register_coco_instances(args.dataset_folder.split("/")[0] + "-train", {}, train_path + "/_annotations.coco.json", train_path)
+        register_coco_instances(args.dataset_folder.split("/")[0] + "-val", {}, val_path + "/_annotations.coco.json", val_path)
+        cfg.DATASETS.TRAIN = (args.dataset_folder.split("/")[0] + "-train",)
+        cfg.DATASETS.TEST = (args.dataset_folder.split("/")[0] + "-val",)
+    # Add wandb config if specified
+    if hasattr(args, "wandb_project") and args.wandb_project:
+        cfg.WANDB_PROJECT = args.wandb_project
+    if hasattr(args, "wandb_run_name") and args.wandb_run_name:
+        cfg.WANDB_RUN_NAME = args.wandb_run_name
     
-    # Register custom datasets if provided via command line
-    if hasattr(args, 'train_json') and args.train_json:
-        if not hasattr(args, 'train_images') or not args.train_images:
-            raise ValueError("--train-json requires --train-images to be specified")
-        
-        # Use custom name if provided, otherwise generate a safe name
-        if hasattr(args, 'train_name') and args.train_name:
-            train_name = args.train_name
-        else:
-            train_name = f"{args.train_images.split('/')[-3]}_train"
-        
-        # Register the training dataset
-        register_dataset_from_args(train_name, args.train_json, args.train_images)
-        
-        # Update config to use this dataset
-        cfg.defrost()
-        cfg.DATASETS.TRAIN = (train_name,)
-        cfg.freeze()
-    
-    # Register custom test dataset if provided
-    if hasattr(args, 'test_json') and args.test_json:
-        if not hasattr(args, 'test_images') or not args.test_images:
-            raise ValueError("--test-json requires --test-images to be specified")
-        
-        # Use custom name if provided, otherwise generate a safe name
-        if hasattr(args, 'test_name') and args.test_name:
-            test_name = args.test_name
-        else:
-            test_name = f"{args.train_images.split('/')[-3]}_test"
-        
-        # Register the test dataset
-        register_dataset_from_args(test_name, args.test_json, args.test_images)
-        
-        # Update config to use this dataset
-        cfg.defrost()
-        cfg.DATASETS.TEST = (test_name,)
-        cfg.freeze()
-    
+    cfg.OUTPUT_DIR = args.output_dir
     cfg.freeze()
     default_setup(cfg, args)
     return cfg
@@ -163,41 +145,26 @@ if __name__ == "__main__":
     parser = default_argument_parser()
     
     # Add custom dataset arguments
-    parser.add_argument(
-        "--train-json",
+        args.add_argument(
+        "--dataset-folder",
         type=str,
-        default="",
-        help="Path to training dataset JSON file in COCO format"
+        help="Path to a COCO format dataset JSON file to register.",
     )
-    parser.add_argument(
-        "--train-images",
+    args.add_argument(
+        "--wandb-project",
         type=str,
-        default="",
-        help="Path to directory containing training images"
+        help="Name of the Weights & Biases project.",
     )
-    parser.add_argument(
-        "--train-name",
+    args.add_argument(
+        "--wandb-run-name",
         type=str,
-        default="",
-        help="Custom name for training dataset (default: my_dataset_train)"
+        help="Name of the Weights & Biases run.",
     )
-    parser.add_argument(
-        "--test-json",
+    args.add_argument(
+        "--output-dir",
+        default="output",
         type=str,
-        default="",
-        help="Path to test dataset JSON file in COCO format"
-    )
-    parser.add_argument(
-        "--test-images",
-        type=str,
-        default="",
-        help="Path to directory containing test images"
-    )
-    parser.add_argument(
-        "--test-name",
-        type=str,
-        default="",
-        help="Custom name for test dataset (default: my_dataset_test)"
+        help="Directory to save output files.",
     )
     
     args = parser.parse_args()
