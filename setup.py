@@ -1,203 +1,146 @@
 #!/usr/bin/env python
+"""
+ISTR Installation Script
+
+This setup.py handles the installation of:
+1. Detectron2 (from the detectron2/ subdirectory as a local dependency - MUST be editable)
+2. ISTR (as a separate package that uses detectron2)
+3. ISTR configs are injected into detectron2.model_zoo for seamless integration
+
+Installation:
+    pip install -e . --no-build-isolation
+
+The ISTR configs will be available through detectron2's model zoo:
+    from detectron2 import model_zoo
+    cfg.merge_from_file(model_zoo.get_config_file("ISTR/ISTR-AE-R50-3x.yaml"))
+"""
 
 import glob
 import os
 import shutil
-from os import path
+from pathlib import Path
 from setuptools import find_packages, setup
-from typing import List
+from setuptools.command.develop import develop
+from setuptools.command.build_py import build_py
 
 
-def get_version():
-    init_py_path = path.join(path.abspath(path.dirname(__file__)), "detectron2", "__init__.py")
-    init_py = open(init_py_path, "r").readlines()
-    version_line = [l.strip() for l in init_py if l.startswith("__version__")][0]
-    version = version_line.split("=")[-1].strip().strip("'\"")
-
-    suffix = os.getenv("D2_VERSION_SUFFIX", "")
-    version = version + suffix
-
-    if os.getenv("BUILD_NIGHTLY", "0") == "1":
-        from datetime import datetime
-        date_str = datetime.today().strftime("%y%m%d")
-        version = version + ".dev" + date_str
-
-        new_init_py = [l for l in init_py if not l.startswith("__version__")]
-        new_init_py.append('__version__ = "{}"\n'.format(version))
-        with open(init_py_path, "w") as f:
-            f.write("".join(new_init_py))
-    return version
+def get_istr_version():
+    """Get ISTR version."""
+    version_file = Path(__file__).parent / "projects" / "ISTR" / "istr" / "__init__.py"
+    if version_file.exists():
+        with open(version_file, "r") as f:
+            for line in f:
+                if line.startswith("__version__"):
+                    return line.split("=")[-1].strip().strip("'\"")
+    return "1.0.0"
 
 
-def get_model_zoo_configs() -> List[str]:
-    source_configs_dir = path.join(path.dirname(path.realpath(__file__)), "projects", "ISTR", "configs")
-    destination = path.join(
-        path.dirname(path.realpath(__file__)), "detectron2", "model_zoo", "configs"
-    )
-    if path.exists(source_configs_dir):
-        if path.islink(destination):
-            os.unlink(destination)
-        elif path.isdir(destination):
-            shutil.rmtree(destination)
-
-    if not path.exists(destination):
-        try:
-            os.symlink(source_configs_dir, destination)
-        except OSError:
-            shutil.copytree(source_configs_dir, destination)
-
-    config_paths = glob.glob("configs/**/*.yaml", recursive=True)
-    return config_paths
-
-
-def get_extensions():
-    # we import torch only inside the build step, not at metadata time
-    import torch
-    from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension
-    from torch.utils.hipify import hipify_python
-    from torch.utils.cpp_extension import ROCM_HOME
-
-    torch_ver = [int(x) for x in torch.__version__.split(".")[:2]]
-    if torch_ver < [1, 6]:
-        raise RuntimeError("Requires PyTorch >= 1.6")
-
-    this_dir = path.dirname(path.abspath(__file__))
-    extensions_dir = path.join(this_dir, "detectron2", "layers", "csrc")
-
-    main_source = path.join(extensions_dir, "vision.cpp")
-    sources = glob.glob(path.join(extensions_dir, "**", "*.cpp"))
-
-    is_rocm_pytorch = (
-        True if ((torch.version.hip is not None) and (ROCM_HOME is not None)) else False
-    )
-
-    hipify_ver = (
-        [int(x) for x in torch.utils.hipify.__version__.split(".")]
-        if hasattr(torch.utils.hipify, "__version__")
-        else [0, 0, 0]
-    )
-
-    if is_rocm_pytorch and hipify_ver < [1, 0, 0]:
-        hipify_python.hipify(
-            project_directory=this_dir,
-            output_directory=this_dir,
-            includes="/detectron2/layers/csrc/*",
-            show_detailed=True,
-            is_pytorch_extension=True,
-        )
-
-        source_cuda = glob.glob(path.join(extensions_dir, "**", "hip", "*.hip")) + \
-                      glob.glob(path.join(extensions_dir, "hip", "*.hip"))
-
-        shutil.copy(
-            "detectron2/layers/csrc/box_iou_rotated/box_iou_rotated_utils.h",
-            "detectron2/layers/csrc/box_iou_rotated/hip/box_iou_rotated_utils.h",
-        )
-        shutil.copy(
-            "detectron2/layers/csrc/deformable/deform_conv.h",
-            "detectron2/layers/csrc/deformable/hip/deform_conv.h",
-        )
-
-        sources = [main_source] + sources
-        sources = [
-            s for s in sources
-            if not is_rocm_pytorch or torch_ver < [1, 7] or not s.endswith("hip/vision.cpp")
-        ]
-    else:
-        source_cuda = glob.glob(path.join(extensions_dir, "**", "*.cu")) + \
-                      glob.glob(path.join(extensions_dir, "*.cu"))
-        sources = [main_source] + sources
-
-    extension = CppExtension
-    extra_compile_args = {"cxx": []}
-    define_macros = []
-
-    if (torch.cuda.is_available() and ((CUDA_HOME is not None) or is_rocm_pytorch)) or \
-       os.getenv("FORCE_CUDA", "0") == "1":
-        extension = CUDAExtension
-        sources += source_cuda
-
-        if not is_rocm_pytorch:
-            define_macros += [("WITH_CUDA", None)]
-            extra_compile_args["nvcc"] = [
-                "-O3",
-                "-DCUDA_HAS_FP16=1",
-                "-D__CUDA_NO_HALF_OPERATORS__",
-                "-D__CUDA_NO_HALF_CONVERSIONS__",
-                "-D__CUDA_NO_HALF2_OPERATORS__",
-            ]
-        else:
-            define_macros += [("WITH_HIP", None)]
-            extra_compile_args["nvcc"] = []
-
-        if torch_ver < [1, 7]:
-            CC = os.environ.get("CC", None)
-            if CC is not None:
-                extra_compile_args["nvcc"].append("-ccbin={}".format(CC))
-
-    include_dirs = [extensions_dir]
-
-    # convert all paths to be relative to project root for setuptools
-    proj_root = this_dir
-    sources = [os.path.relpath(s, proj_root).replace(os.sep, "/") for s in sources]
-    include_dirs = [os.path.relpath(d, proj_root).replace(os.sep, "/") for d in include_dirs]
-
-    ext_modules = [
-        extension(
-            "detectron2._C",
-            sources,
-            include_dirs=include_dirs,
-            define_macros=define_macros,
-            extra_compile_args=extra_compile_args,
-        )
-    ]
-    return ext_modules
+def inject_istr_configs_to_detectron2():
+    """
+    Copy ISTR configs into detectron2's model_zoo configs directory.
+    This allows ISTR configs to be accessible via detectron2.model_zoo.
+    """
+    # Source: ISTR configs
+    istr_configs_src = Path(__file__).parent / "projects" / "ISTR" / "configs"
+    
+    # Destination: detectron2's model_zoo configs
+    detectron2_configs = Path(__file__).parent / "detectron2" / "detectron2" / "model_zoo" / "configs"
+    istr_configs_dest = detectron2_configs / "ISTR"
+    
+    if not istr_configs_src.exists():
+        print(f"Warning: ISTR configs not found at {istr_configs_src}")
+        return
+    
+    if not detectron2_configs.exists():
+        print(f"Warning: Detectron2 model_zoo configs not found at {detectron2_configs}")
+        print("Make sure detectron2 is installed in editable mode first!")
+        return
+    
+    # Remove old ISTR configs if they exist
+    if istr_configs_dest.exists():
+        if istr_configs_dest.is_symlink():
+            istr_configs_dest.unlink()
+        elif istr_configs_dest.is_dir():
+            shutil.rmtree(istr_configs_dest)
+    
+    # Create symlink or copy configs
+    try:
+        # Try to create a symlink (preferred for editable installs)
+        istr_configs_dest.symlink_to(istr_configs_src.absolute(), target_is_directory=True)
+        print(f"✓ Symlinked ISTR configs to detectron2.model_zoo: {istr_configs_dest}")
+    except (OSError, NotImplementedError):
+        # Fall back to copying if symlink fails (e.g., on Windows)
+        shutil.copytree(istr_configs_src, istr_configs_dest)
+        print(f"✓ Copied ISTR configs to detectron2.model_zoo: {istr_configs_dest}")
 
 
-PROJECTS = {
-    "detectron2.projects.ISTR": "projects/ISTR/istr",
-}
+class CustomDevelop(develop):
+    """Custom develop command that injects ISTR configs into detectron2."""
+    
+    def run(self):
+        develop.run(self)
+        inject_istr_configs_to_detectron2()
+
+
+class CustomBuildPy(build_py):
+    """Custom build command that injects ISTR configs into detectron2."""
+    
+    def run(self):
+        build_py.run(self)
+        inject_istr_configs_to_detectron2()
+
+
+# Find ISTR package - the istr package is directly at projects/ISTR/istr
+# We need to tell setuptools where to find it
+istr_packages = find_packages(where="projects/ISTR", exclude=("test*", "demo*"))
+
+# Get absolute path to detectron2 subdirectory for installation
+detectron2_path = Path(__file__).parent.absolute() / "detectron2"
 
 setup(
-    name="detectron2",
-    version=get_version(),
-    url="https://github.com/facebookresearch/detectron2",
-    description="Detectron2",
-    packages=find_packages(exclude=("configs", "tests*")) + list(PROJECTS.keys()),
-    package_dir=PROJECTS,
-    package_data={"detectron2.model_zoo": get_model_zoo_configs()},
+    name="istr",
+    version=get_istr_version(),
+    author="ISTR Authors",
+    url="https://github.com/hujiecpp/ISTR",
+    description="ISTR: End-to-End Instance Segmentation with Transformers",
+    long_description="ISTR is an end-to-end instance segmentation method built on Detectron2.",
+    packages=istr_packages,
+    package_dir={"": "projects/ISTR"},
+    include_package_data=True,
     python_requires=">=3.8",
     install_requires=[
-        "termcolor>=1.1",
-        "Pillow>=7.1",
-        "yacs>=0.1.6",
-        "tabulate",
-        "cloudpickle",
-        "matplotlib",
-        "tqdm>4.29.0",
-        "tensorboard",
-        "fvcore>=0.1.5,<0.1.6",
-        "iopath>=0.1.7,<0.1.8",
-        "pycocotools>=2.0.2",
-        "future",
-        "pydot",
-        "omegaconf>=2.1.0.dev22",
+        # Install detectron2 from local subdirectory using absolute file:// URL
+        f"detectron2 @ file://{detectron2_path}",
+        # ISTR-specific dependencies
+        "torch>=1.8",
+        "torchvision",
+        "opencv-python",
+        "scipy",
+        "shapely",
+        "torch_dct",
+        "timm",
     ],
     extras_require={
-        "all": [
-            "shapely",
-            "psutil",
-            "hydra-core",
-            "panopticapi @ https://github.com/cocodataset/panopticapi/archive/master.zip",
-        ],
         "dev": [
-            "flake8==3.8.1",
-            "isort==4.3.21",
-            "black==20.8b1",
-            "flake8-bugbear",
-            "flake8-comprehensions",
+            "black==22.3.0",
+            "flake8",
+            "isort",
         ],
     },
-    ext_modules=get_extensions(),
-    cmdclass={"build_ext": __import__("torch.utils.cpp_extension", fromlist=["BuildExtension"]).BuildExtension},
+    cmdclass={
+        "develop": CustomDevelop,
+        "build_py": CustomBuildPy,
+    },
+    classifiers=[
+        "Development Status :: 4 - Beta",
+        "Intended Audience :: Developers",
+        "Intended Audience :: Science/Research",
+        "License :: OSI Approved :: Apache Software License",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    ],
 )
