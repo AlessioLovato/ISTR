@@ -59,6 +59,8 @@ from detectron2.utils.visualizer import Visualizer, ColorMode
 from detectron2.data import MetadataCatalog
 from detectron2.engine import DefaultTrainer
 from detectron2.data.datasets import register_coco_instances
+from detectron2.evaluation import COCOEvaluator
+from detectron2.evaluation.coco_evaluation import instances_to_coco_json
 
 # ISTR imports
 try:
@@ -147,9 +149,9 @@ CONFIG = {
             "run_name": "pca_50_big-images-rev",
             "type": "detectron2",
             "config": "detectron2/detectron2/model_zoo/configs/ISTR/ISTR-PCA-R50-3x.yaml",
-            "weights": "../shared/models/output_pca_50_big-images-rev/model_0009999.pth",
+            "weights": "../shared/models/output_pca_50_big-images-rev/model_0019999.pth",
             "confidence": 0.5,
-            "epoch": "9999",
+            "epoch": "19999",
             "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]
         },
         "istr_contrast": {
@@ -157,9 +159,9 @@ CONFIG = {
             "run_name": "pca_50_big-images-rev-contrast",
             "type": "detectron2",
             "config": "detectron2/detectron2/model_zoo/configs/ISTR/ISTR-PCA-R50-3x.yaml",
-            "weights": "../shared/models/output_pca_50_big-images-rev-contrast/model_0009999.pth",
+            "weights": "../shared/models/output_pca_50_big-images-rev-contrast/model_0019999.pth",
             "confidence": 0.5,
-            "epoch": "9999",
+            "epoch": "19999",
             "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]
         },
     },
@@ -363,7 +365,9 @@ def load_detectron2_model(model_key):
     
     cfg.merge_from_file(config_file)
     cfg.MODEL.WEIGHTS = weights
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = model_info["confidence"]
+    # Use very low threshold for evaluation - COCO eval handles filtering
+    # This matches train_net.py behavior
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.0001
     cfg.MODEL.DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     cfg.freeze()
     
@@ -384,16 +388,29 @@ def load_detectron2_model(model_key):
 # INFERENCE FUNCTIONS
 # ============================================================================
 
-def run_yolo_inference(model, image_path, confidence_threshold):
-    """Run YOLO inference on a single image."""
+def run_yolo_inference(model, image_path, confidence_threshold, eval_mode=False):
+    """Run YOLO inference on a single image.
+    
+    Args:
+        model: YOLO model
+        image_path: Path to image
+        confidence_threshold: Threshold for visualization
+        eval_mode: If True, use very low threshold (0.001) for evaluation
+    """
     start_time = time.time()
     
-    results = model(image_path, conf=confidence_threshold, verbose=False)
+    # Use very low threshold for evaluation to match train_net.py behavior
+    conf_thr = 0.001 if eval_mode else confidence_threshold
+    results = model(image_path, conf=conf_thr, verbose=False)
     
     inference_time = time.time() - start_time
     
     # Get annotated image (convert BGR to RGB)
-    annotated_img_bgr = results[0].plot()
+    # For visualization, filter by user's threshold
+    if eval_mode:
+        annotated_img_bgr = results[0].plot(conf=True)
+    else:
+        annotated_img_bgr = results[0].plot()
     annotated_img = cv2.cvtColor(annotated_img_bgr, cv2.COLOR_BGR2RGB)
     
     num_detections = len(results[0].boxes) if results[0].boxes is not None else 0
@@ -402,7 +419,11 @@ def run_yolo_inference(model, image_path, confidence_threshold):
 
 
 def run_detectron2_inference(model, metadata, image_path, confidence_threshold):
-    """Run Detectron2 model inference on a single image."""
+    """Run Detectron2 model inference on a single image.
+    
+    Note: confidence_threshold is only used for counting displayed detections.
+    The model uses cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST set during model loading.
+    """
     img = read_image(image_path, format="BGR")
     
     start_time = time.time()
@@ -445,8 +466,12 @@ def binary_mask_to_rle(bmask):
     return rle
 
 
-def yolo_result_to_coco(results_obj, image_id, confidence_thr=0.5):
-    """Convert YOLO results to COCO format."""
+def yolo_result_to_coco(results_obj, image_id, confidence_thr=None):
+    """Convert YOLO results to COCO format.
+    
+    Note: confidence_thr is ignored for COCO evaluation - all predictions are kept
+    and COCO evaluation handles filtering internally.
+    """
     out = []
     
     try:
@@ -479,12 +504,11 @@ def yolo_result_to_coco(results_obj, image_id, confidence_thr=0.5):
     if masks is not None and len(masks) > 0:
         for i in range(masks.shape[0]):
             conf = float(scores[i])
-            if conf < confidence_thr:
-                continue
+            # Don't filter by confidence - COCO evaluation handles this
             mask_bin = masks[i].astype(np.uint8)
             rle = binary_mask_to_rle(mask_bin)
             bbox = maskUtils.toBbox(rle).tolist()
-            cat = int(classes[i]) + 1
+            cat = int(classes[i])
             out.append({
                 "image_id": int(image_id),
                 "category_id": int(cat),
@@ -495,12 +519,11 @@ def yolo_result_to_coco(results_obj, image_id, confidence_thr=0.5):
     elif boxes is not None:
         for i in range(len(boxes)):
             conf = float(scores[i])
-            if conf < confidence_thr:
-                continue
+            # Don't filter by confidence - COCO evaluation handles this
             x1, y1, x2, y2 = boxes[i].tolist()
             w = x2 - x1
             h = y2 - y1
-            cat = int(classes[i]) + 1
+            cat = int(classes[i])
             out.append({
                 "image_id": int(image_id),
                 "category_id": int(cat),
@@ -511,8 +534,12 @@ def yolo_result_to_coco(results_obj, image_id, confidence_thr=0.5):
     return out
 
 
-def detectron2_preds_to_coco(predictions, image_id, confidence_thr=0.5):
-    """Convert detectron2 predictions to COCO format."""
+def detectron2_preds_to_coco(predictions, image_id, confidence_thr=None):
+    """Convert detectron2 predictions to COCO format.
+    
+    Note: confidence_thr is ignored for COCO evaluation - all predictions are kept
+    and COCO evaluation handles filtering internally.
+    """
     results = []
     if "instances" not in predictions:
         return results
@@ -524,11 +551,10 @@ def detectron2_preds_to_coco(predictions, image_id, confidence_thr=0.5):
     if hasattr(instances, "pred_masks"):
         masks = instances.pred_masks.numpy()
         for i, mask in enumerate(masks):
-            if scores[i] < confidence_thr:
-                continue
+            # Don't filter by confidence - COCO evaluation handles this
             rle = binary_mask_to_rle(mask)
             bbox = maskUtils.toBbox(rle).tolist()
-            cat_id = int(classes[i]) + 1
+            cat_id = int(classes[i])
             results.append({
                 "image_id": int(image_id),
                 "category_id": cat_id,
@@ -540,12 +566,11 @@ def detectron2_preds_to_coco(predictions, image_id, confidence_thr=0.5):
         boxes = instances.pred_boxes.tensor.numpy() if hasattr(instances, "pred_boxes") else None
         if boxes is not None:
             for i, box in enumerate(boxes):
-                if scores[i] < confidence_thr:
-                    continue
+                # Don't filter by confidence - COCO evaluation handles this
                 x1, y1, x2, y2 = box.tolist()
                 w = x2 - x1
                 h = y2 - y1
-                cat_id = int(classes[i]) + 1
+                cat_id = int(classes[i])
                 results.append({
                     "image_id": int(image_id),
                     "category_id": cat_id,
@@ -576,11 +601,13 @@ def compute_yolo_metrics_for_pair(gt_boxes, pred_boxes, iou_threshold=0.50, use_
         try:
             iou = maskUtils.iou([seg1], [seg2], [0])[0][0]
             return float(iou)
-        except:
+        except Exception as e:
+            # Log the error for debugging
+            print(f"Warning: Mask IoU computation failed: {e}")
             return 0.0
     
     def compute_bbox_iou(b1, b2):
-        """Compute IoU between two bounding boxes."""
+        """Compute IoU between two bounding boxes (XYWH format)."""
         x1 = max(b1[0], b2[0])
         y1 = max(b1[1], b2[1])
         x2 = min(b1[0] + b1[2], b2[0] + b2[2])
@@ -589,48 +616,74 @@ def compute_yolo_metrics_for_pair(gt_boxes, pred_boxes, iou_threshold=0.50, use_
         union = b1[2] * b1[3] + b2[2] * b2[3] - inter
         return inter / union if union > 0 else 0
     
-    TP = 0
-    FP = 0
-    FN = 0
-    
-    gt_used = set()
+    # Group predictions and ground truth by image_id and category_id
+    preds_by_img_cat = defaultdict(list)
+    gts_by_img_cat = defaultdict(list)
     
     for pred in pred_boxes:
-        best_iou = 0
-        best_gt = None
+        key = (pred['image_id'], pred['category_id'])
+        preds_by_img_cat[key].append(pred)
+    
+    for gt in gt_boxes:
+        key = (gt['image_id'], gt['category_id'])
+        gts_by_img_cat[key].append(gt)
+    
+    TP = 0
+    FP = 0
+    total_gt = len(gt_boxes)
+    
+    # Process each image-category combination
+    for key in preds_by_img_cat.keys():
+        preds = preds_by_img_cat[key]
+        gts = gts_by_img_cat.get(key, [])
         
-        for i, gt in enumerate(gt_boxes):
-            if gt['image_id'] != pred['image_id']:
-                continue
+        if len(gts) == 0:
+            # All predictions are false positives
+            FP += len(preds)
+            continue
+        
+        # Track which GTs have been matched in this image-category
+        gt_matched = set()
+        
+        # Sort predictions by confidence (descending)
+        preds_sorted = sorted(preds, key=lambda x: x.get('score', 1.0), reverse=True)
+        
+        for pred in preds_sorted:
+            best_iou = 0
+            best_gt_idx = None
             
-            if use_masks:
-                pred_seg = pred.get('segmentation')
-                gt_seg = gt.get('segmentation')
-                if pred_seg and gt_seg:
-                    iou = compute_mask_iou(pred_seg, gt_seg)
+            for gt_idx, gt in enumerate(gts):
+                # Skip already matched GTs
+                if gt_idx in gt_matched:
+                    continue
+                
+                # Compute IoU
+                if use_masks:
+                    pred_seg = pred.get('segmentation')
+                    gt_seg = gt.get('segmentation')
+                    if pred_seg and gt_seg:
+                        iou = compute_mask_iou(pred_seg, gt_seg)
+                    else:
+                        iou = compute_bbox_iou(pred['bbox'], gt['bbox'])
                 else:
                     iou = compute_bbox_iou(pred['bbox'], gt['bbox'])
-            else:
-                iou = compute_bbox_iou(pred['bbox'], gt['bbox'])
+                
+                if iou > best_iou:
+                    best_iou = iou
+                    best_gt_idx = gt_idx
             
-            if iou > best_iou:
-                best_iou = iou
-                best_gt = i
-        
-        if best_iou >= iou_threshold:
-            if best_gt not in gt_used:
+            # Check if match is above threshold
+            if best_iou >= iou_threshold and best_gt_idx is not None:
                 TP += 1
-                gt_used.add(best_gt)
+                gt_matched.add(best_gt_idx)
             else:
                 FP += 1
-        else:
-            FP += 1
     
-    FN = len(gt_boxes) - len(gt_used)
+    FN = total_gt - TP
     
-    precision = TP / (TP + FP) if (TP + FP) else 0
-    recall = TP / (TP + FN) if (TP + FN) else 0
-    f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) else 0
+    precision = TP / (TP + FP) if (TP + FP) > 0 else 0
+    recall = TP / (TP + FN) if (TP + FN) > 0 else 0
+    f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
     
     return {
         "precision_50": truncate3(precision),
@@ -816,6 +869,50 @@ def coco_evaluate(gt_json_path, pred_json_path, iou_type='segm'):
         return None
 
 
+def coco_evaluate_with_evaluator(dataset_name, pred_json_path, output_dir):
+    """Run COCO evaluation using Detectron2's COCOEvaluator (matches train_net.py exactly).
+    
+    Args:
+        dataset_name: Registered dataset name (e.g., 'comparison_big-images-rev')
+        pred_json_path: Path to predictions JSON
+        output_dir: Output directory for results
+        
+    Returns:
+        dict: Evaluation results with both bbox and segm metrics
+    """
+    try:
+        # Create evaluator (matches train_net.py behavior)
+        evaluator = COCOEvaluator(dataset_name, output_dir=str(output_dir))
+        evaluator.reset()
+        
+        # Load predictions
+        with open(pred_json_path, 'r') as f:
+            predictions_list = json.load(f)
+        
+        # Group by image_id
+        predictions_by_image = defaultdict(list)
+        for pred in predictions_list:
+            predictions_by_image[pred['image_id']].append(pred)
+        
+        # Process each image (simulating evaluator.process())
+        for image_id, preds in predictions_by_image.items():
+            prediction = {
+                "image_id": image_id,
+                "instances": preds  # COCOEvaluator expects this format
+            }
+            evaluator._predictions.append(prediction)
+        
+        # Run evaluation
+        results = evaluator.evaluate()
+        return results
+        
+    except Exception as e:
+        print(f"Error in COCOEvaluator evaluation: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def bbox_stats(bboxes):
     """Generate bar plots for YOLO-style metrics."""
     if not yolo_metrics:
@@ -948,15 +1045,20 @@ def generate_confusion_matrices(yolo_metrics, coco_predictions, coco_map, output
         
         coco_gt = gt_info['coco']
         
-        # Build confusion matrix (3 classes + background)
-        # Classes: 0=background, 1=positive, 2=negative, 3=lines
-        num_classes = 4
+        # Build confusion matrix for 3 classes: 0=positive, 1=negative, 2=lines
+        # Note: COCO uses category_ids 0, 1, 2 directly (no background class)
+        num_classes = 3
         cm = np.zeros((num_classes, num_classes), dtype=int)
         
-        # Group predictions by image
+        # Group predictions by image, filtering invalid category IDs
         pred_by_img = defaultdict(list)
         for pred in pred_boxes:
-            pred_by_img[pred['image_id']].append(pred)
+            cat_id = pred.get('category_id', -1)
+            if 0 <= cat_id < num_classes:
+                pred_by_img[pred['image_id']].append(pred)
+            else:
+                # Skip predictions with invalid category IDs
+                continue
         
         # Group GT by image
         gt_by_img = defaultdict(list)
@@ -1009,39 +1111,40 @@ def generate_confusion_matrices(yolo_metrics, coco_predictions, coco_map, output
             gts = gt_by_img.get(img_id, [])
             
             for pred in preds:
-                pred_class = pred['category_id']  # 1, 2, or 3
+                pred_class = pred['category_id']
+                if not (0 <= pred_class < num_classes):
+                    continue  # Skip invalid predictions
+                    
                 best_iou = 0
-                best_gt_class = 0  # background
+                best_gt_class = None
                 best_gt_idx = None
                 
                 for idx, gt in enumerate(gts):
+                    gt_class = gt['category_id']
+                    if not (0 <= gt_class < num_classes):
+                        continue  # Skip invalid GT
+                        
                     gt_key = (img_id, idx)
                     if gt_key in matched_gt:
                         continue
                     iou = compute_iou(pred, gt)
                     if iou > best_iou:
                         best_iou = iou
-                        best_gt_class = gt['category_id']
+                        best_gt_class = gt_class
                         best_gt_idx = gt_key
                 
-                if best_iou >= 0.5 and best_gt_idx:
+                if best_iou >= 0.5 and best_gt_idx is not None and best_gt_class is not None:
                     matched_gt.add(best_gt_idx)
                     cm[best_gt_class, pred_class] += 1
-                else:
-                    # False positive (predicted but no matching GT)
-                    cm[0, pred_class] += 1
+                # False positives are not tracked in confusion matrix
             
-            # Unmatched GT (false negatives)
-            for idx, gt in enumerate(gts):
-                gt_key = (img_id, idx)
-                if gt_key not in matched_gt:
-                    gt_class = gt['category_id']
-                    cm[gt_class, 0] += 1
+            # Unmatched GT (false negatives) - not tracked in current implementation
+            # Could add separate tracking if needed
         
         # Plot confusion matrix
         fig, ax = plt.subplots(figsize=(6, 5))
         
-        class_names = ['Background', 'Positive', 'Negative', 'Lines']
+        class_names = ['Positive', 'Negative', 'Lines']
         im = ax.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
         ax.figure.colorbar(im, ax=ax)
         
@@ -1497,15 +1600,18 @@ def run_all_inferences(datasets):
                 
                 # Run inference based on model type
                 if model_type == "yolo":
+                    # Use eval_mode=True for COCO evaluation (keeps all predictions)
+                    eval_mode = (dataset_format == "coco")
                     annotated_img, num_detections, inference_time, res0 = run_yolo_inference(
-                        model, img_path, confidence
+                        model, img_path, confidence, eval_mode=eval_mode
                     )
                     
                     # Convert to COCO format if evaluating on COCO dataset
                     if dataset_format == "coco":
                         image_id = filename_to_id.get(img_name)
                         if image_id:
-                            coco_preds = yolo_result_to_coco(res0, image_id, confidence)
+                            # Don't filter by confidence - COCO eval handles this
+                            coco_preds = yolo_result_to_coco(res0, image_id)
                             preds_list.extend(coco_preds)
                 
                 elif model_type == "detectron2":
@@ -1516,7 +1622,8 @@ def run_all_inferences(datasets):
                     # Convert to COCO format (detectron2 only works with COCO datasets)
                     image_id = filename_to_id.get(img_name)
                     if image_id:
-                        coco_preds = detectron2_preds_to_coco(predictions, image_id, confidence)
+                        # Don't filter by confidence - COCO eval handles this
+                        coco_preds = detectron2_preds_to_coco(predictions, image_id)
                         preds_list.extend(coco_preds)
                 
                 # Store results
