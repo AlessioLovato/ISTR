@@ -1,21 +1,110 @@
 """
-Evaluation script with visualization support for ISTR.
+Comprehensive Multi-Model Evaluation Script with Gallery Visualization
 
-This script combines evaluation capabilities from train_net.py with 
-visualization features from demo.py, allowing you to:
-- Run evaluation on a dataset
-- Visualize predictions on images
-- Save visualized outputs
+This script provides a unified pipeline for evaluating multiple object detection and 
+instance segmentation models (YOLO, Mask R-CNN, ISTR) with advanced visualization and 
+comparison capabilities.
 
-Usage:
-    # Run evaluation only
-    python eval.py --eval-only
+Features:
+- Automatic evaluation of multiple models on multiple datasets
+- COCO metrics (AP, AP50, AP75, per-class, scale-based)
+- YOLO-style metrics (Precision, Recall, F1 @ IoU=0.5)
+- Automatic visualization saving for all predictions
+- Interactive gallery viewer for comparing models side-by-side
+- Confusion matrices and PR curves
+- Comprehensive Markdown and CSV reports
+- Smart caching: skip evaluation if results exist
+- Support for unlabeled images (automatic prediction)
+- Prediction mode for inference on custom images
+
+Configuration:
+- All models and datasets are configured in the CONFIG dictionary at the top of the script
+- Add/remove models or datasets by modifying the CONFIG dict
+- Supports both YOLO and detectron2-based models (Mask R-CNN, ISTR, etc.)
+
+Usage Examples:
+
+    # Full evaluation with report generation
+    python eval.py --output-dir eval_results
     
-    # Run evaluation with visualization
-    python eval.py --eval-only --visualize
+    # Evaluation + interactive gallery viewer
+    python eval.py --gallery --output-dir eval_results
     
-    # Visualize specific images
-    python eval.py --eval-only --visualize --input path/to/images/*.jpg
+    # Force re-evaluation (ignore cached results)
+    python eval.py --gallery --force-eval --output-dir eval_results
+    
+    # Gallery only (load existing results)
+    python eval.py --gallery --output-dir eval_results
+    
+    # Predict on unlabeled images (no evaluation)
+    python eval.py --predict-only --input /path/to/images/ --output-dir predictions
+    python eval.py --predict-only --input img1.jpg img2.jpg img3.jpg --output-dir predictions
+    
+    # Custom confidence threshold for visualization
+    python eval.py --confidence-threshold 0.7 --output-dir eval_results
+
+Arguments:
+    --gallery           Display interactive gallery viewer with keyboard navigation
+    --force-eval        Force re-evaluation even if cached results exist
+    --predict-only      Run inference on custom images without evaluation
+    --input             Path(s) to images or directory (used with --predict-only)
+    --output-dir        Directory to save all results (default: eval_results)
+    --confidence-threshold  Minimum score for visualization (default: 0.5)
+    --num_gpus          Number of GPUs to use (default: 1)
+    --opts              Additional config options (detectron2 format)
+
+Automatic Features:
+- Unlabeled images in ../shared/unlabeled_images/ are automatically predicted during evaluation
+- Visualizations are saved automatically for gallery viewing
+- Results are cached - subsequent runs load from disk unless --force-eval is used
+
+Gallery Controls:
+    Arrow Keys / A,D  - Navigate between images
+    Q / ESC          - Quit gallery viewer
+    
+Important Note:
+- The gallery viewer ONLY displays results from full evaluation runs (with ground truth)
+- --predict-only mode saves annotated images to disk but does NOT launch the gallery
+- To view predict-only results, browse the output directory manually or use an image viewer
+
+Output Structure:
+    output_dir/
+        comprehensive_evaluation_report.md  # Detailed Markdown report
+        evaluation_summary.csv              # Metrics in CSV format
+        confusion_matrices_grid.png         # Grid of confusion matrices
+        pr_curves_merged_*.png              # Precision-Recall curves
+        visualizations/
+            {model_key}/
+                {dataset_name}/
+                    *.png                    # Annotated predictions
+                unlabeled/
+                    *.png                    # Predictions on unlabeled images
+        {model_run_name}/
+            inference/
+                {dataset_name}/
+                    coco_instances_results.json  # COCO format predictions
+
+Configuration Example:
+    CONFIG = {
+        "models": {
+            "maskrcnn_normal": {
+                "name": "Mask R-CNN R50-FPN",
+                "type": "detectron2",
+                "weights": "../shared/models/model_final.pth",
+                "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]
+            }
+        },
+        "datasets": {
+            "big-images-rev": {
+                "path": "../shared/coco-big-images-rev",
+                "format": "coco"
+            },
+            "unlabeled": {
+                "path": "../shared/unlabeled_images",
+                "format": "unlabeled"
+            }
+        }
+    }
 """
 
 import os
@@ -55,6 +144,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+
+# ISTR imports
+try:
+    from istr import add_ISTR_config
+except ImportError:
+    add_ISTR_config = None
+
 try:
     from ultralytics import YOLO
     YOLO_AVAILABLE = True
@@ -89,28 +185,33 @@ CONFIG = {
             "format": "coco",
             "description": "Big Images Rev Contrast (COCO format)"
         },
+        "unlabeled": {
+            "path": "../shared/unlabeled_images",
+            "format": "unlabeled",
+            "description": "Unlabeled images for prediction only"
+        },
     },
     
     # Model definitions
     "models": {
-        # "yolo_normal": {
-        #     "name": "YOLOv11n-seg",
-        #     "run_name": "BIR",
-        #     "type": "yolo",  # 'yolo' or 'detectron2'
-        #     "weights": "../shared/n_bir.pt",
-        #     "confidence": 0.5,
-        #     "epoch": "final",
-        #     "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]  # YOLO works with COCO format too for evaluation
-        # },
-        # "yolo_contrast": {
-        #     "name": "YOLOv11n-seg",
-        #     "run_name": "BIRC",
-        #     "type": "yolo",
-        #     "weights": "../shared/n_birc.pt",
-        #     "confidence": 0.5,
-        #     "epoch": "final",
-        #     "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]
-        # },
+        "yolo_normal": {
+            "name": "YOLOv11n-seg",
+            "run_name": "BIR",
+            "type": "yolo",  # 'yolo' or 'detectron2'
+            "weights": "../shared/n_bir.pt",
+            "confidence": 0.5,
+            "epoch": "final",
+            "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]  # YOLO works with COCO format too for evaluation
+        },
+        "yolo_contrast": {
+            "name": "YOLOv11n-seg",
+            "run_name": "BIRC",
+            "type": "yolo",
+            "weights": "../shared/n_birc.pt",
+            "confidence": 0.5,
+            "epoch": "final",
+            "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]
+        },
         "maskrcnn_normal": {
             "name": "Mask R-CNN R50-FPN",
             "run_name": "maskrcnn_R_50_b16_big_images_rev_short",
@@ -119,38 +220,38 @@ CONFIG = {
             "weights": "../shared/models/output_maskrcnn_R_50_b16_big_images_rev_short/model_final.pth",
             "confidence": 0.5,
             "epoch": "final",
-            "evaluate_on": ["big-images-rev"]  # only COCO datasets
+            "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]  # only COCO datasets
         },
-        # "maskrcnn_contrast": {
-        #     "name": "Mask R-CNN R50-FPN",
-        #     "run_name": "maskrcnn_R_50_b16_aug_big_images_rev_contrast",  # Custom run description
-        #     "type": "detectron2",
-        #     "config": "detectron2/detectron2/model_zoo/configs/COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml",
-        #     "weights": "../shared/models/output_maskrcnn_R_50_b16_aug_big_images_rev_contrast/model_final.pth",
-        #     "confidence": 0.5,
-        #     "epoch": "final",
-        #     "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]
-        # },
-        # "istr_normal": {
-        #     "name": "ISTR-PCA-R50",
-        #     "run_name": "pca_50_big-images-rev",
-        #     "type": "detectron2",
-        #     "config": "detectron2/detectron2/model_zoo/configs/ISTR/ISTR-PCA-R50-3x.yaml",
-        #     "weights": "../shared/models/output_pca_50_big-images-rev/model_0019999.pth",
-        #     "confidence": 0.5,
-        #     "epoch": "19999",
-        #     "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]
-        # },
-        # "istr_contrast": {
-        #     "name": "ISTR-PCA-R50",
-        #     "run_name": "pca_50_big-images-rev-contrast",
-        #     "type": "detectron2",
-        #     "config": "detectron2/detectron2/model_zoo/configs/ISTR/ISTR-PCA-R50-3x.yaml",
-        #     "weights": "../shared/models/output_pca_50_big-images-rev-contrast/model_0019999.pth",
-        #     "confidence": 0.5,
-        #     "epoch": "19999",
-        #     "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]
-        # },
+        "maskrcnn_contrast": {
+            "name": "Mask R-CNN R50-FPN",
+            "run_name": "maskrcnn_R_50_b16_aug_big_images_rev_contrast",  # Custom run description
+            "type": "detectron2",
+            "config": "detectron2/detectron2/model_zoo/configs/COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml",
+            "weights": "../shared/models/output_maskrcnn_R_50_b16_aug_big_images_rev_contrast/model_final.pth",
+            "confidence": 0.5,
+            "epoch": "final",
+            "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]
+        },
+        "istr_normal": {
+            "name": "ISTR-PCA-R50",
+            "run_name": "pca_50_big-images-rev",
+            "type": "istr",
+            "config": "detectron2/detectron2/model_zoo/configs/ISTR/ISTR-PCA-R50-3x.yaml",
+            "weights": "../shared/models/output_pca_50_big-images-rev/model_0019999.pth",
+            "confidence": 0.5,
+            "epoch": "19999",
+            "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]
+        },
+        "istr_contrast": {
+            "name": "ISTR-PCA-R50",
+            "run_name": "pca_50_big-images-rev-contrast",
+            "type": "istr",
+            "config": "detectron2/detectron2/model_zoo/configs/ISTR/ISTR-PCA-R50-3x.yaml",
+            "weights": "../shared/models/output_pca_50_big-images-rev-contrast/model_0019999.pth",
+            "confidence": 0.5,
+            "epoch": "19999",
+            "evaluate_on": ["big-images-rev", "big-images-rev-contrast"]
+        },
     },
     
     "output_dir": "model_comparison_results",
@@ -467,6 +568,152 @@ def compute_yolo_metrics(gt_json_path, pred_json_path, iou_threshold=0.50):
         "FP": FP,
         "FN": FN
     }
+
+
+def predict_on_images(model, cfg, image_paths, output_dir, args):
+    """
+    Run inference on unlabeled images and save visualizations.
+    
+    Args:
+        model: trained model (YOLOWrapper or detectron2 model)
+        cfg: config object or dict (for YOLO)
+        image_paths: list of image file paths
+        output_dir: directory to save predictions
+        args: command line arguments
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    logger.info(f"Running predictions on {len(image_paths)} images...")
+    logger.info(f"Saving results to {output_path}")
+    
+    # Handle YOLO models
+    if isinstance(model, YOLOWrapper):
+        for img_path in tqdm(image_paths, desc="Predicting"):
+            img_name = Path(img_path).name
+            
+            # Run YOLO inference
+            results = model.model(img_path, conf=args.confidence_threshold, verbose=False)
+            annotated_img = results[0].plot()  # BGR format
+            annotated_rgb = cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)
+            
+            # Save
+            save_path = output_path / img_name
+            cv2.imwrite(str(save_path), cv2.cvtColor(annotated_rgb, cv2.COLOR_RGB2BGR))
+    else:
+        # Handle detectron2/ISTR models
+        model.eval()  # Ensure model is in eval mode
+        
+        # Get metadata from first registered dataset or create minimal metadata
+        try:
+            metadata = MetadataCatalog.get(list(cfg.DATASETS.TEST)[0]) if cfg.DATASETS.TEST else None
+        except:
+            metadata = None
+        
+        for img_path in tqdm(image_paths, desc="Predicting"):
+            img_name = Path(img_path).name
+            
+            # Load image
+            img = read_image(str(img_path), format="RGB")
+            
+            # Run inference
+            with torch.no_grad():
+                predictions = model([{"image": torch.as_tensor(img.transpose(2, 0, 1))}])
+            
+            # Visualize
+            visualizer = Visualizer(img, metadata=metadata, instance_mode=ColorMode.IMAGE)
+            if "instances" in predictions[0]:
+                instances = predictions[0]["instances"].to("cpu")
+                # Filter by confidence threshold
+                if hasattr(instances, 'scores'):
+                    mask = instances.scores >= args.confidence_threshold
+                    instances = instances[mask]
+                vis_output = visualizer.draw_instance_predictions(instances)
+            else:
+                vis_output = visualizer.output
+            
+            annotated_rgb = vis_output.get_image()
+            
+            # Save
+            save_path = output_path / img_name
+            cv2.imwrite(str(save_path), cv2.cvtColor(annotated_rgb, cv2.COLOR_RGB2BGR))
+    
+    logger.info(f"Predictions saved to {output_path}")
+
+
+def save_visualizations(model, cfg, dataset_name, output_dir, args):
+    """
+    Save visualized predictions for gallery view.
+    
+    Args:
+        model: trained model (YOLOWrapper or detectron2 model)
+        cfg: config object or dict (for YOLO)
+        dataset_name: name of dataset
+        output_dir: directory to save visualizations
+        args: command line arguments
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # output_dir already contains the model_key path: {output_dir}/visualizations/{model_key}
+    output_path = Path(output_dir) / dataset_name
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Get dataset images
+    dataset_dict = DatasetCatalog.get(dataset_name)
+    metadata = MetadataCatalog.get(dataset_name)
+    
+    logger.info(f"Saving visualizations to {output_path}...")
+    
+    # Handle YOLO models (check if it's a YOLOWrapper)
+    if isinstance(model, YOLOWrapper):
+        for item in tqdm(dataset_dict, desc=f"Visualizing {dataset_name}"):
+            img_path = item["file_name"]
+            img_name = Path(img_path).name
+            
+            # Run YOLO inference - use the wrapped model
+            results = model.model(img_path, conf=args.confidence_threshold, verbose=False)
+            annotated_img = results[0].plot()  # BGR format
+            annotated_rgb = cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)
+            
+            # Save
+            save_path = output_path / img_name
+            cv2.imwrite(str(save_path), cv2.cvtColor(annotated_rgb, cv2.COLOR_RGB2BGR))
+    else:
+        # Handle detectron2/ISTR models
+        model.eval()  # Ensure model is in eval mode
+        for item in tqdm(dataset_dict, desc=f"Visualizing {dataset_name}"):
+            img_path = item["file_name"]
+            img_name = Path(img_path).name
+            
+            # Load image
+            img = read_image(img_path, format="RGB")
+            
+            # Run inference
+            with torch.no_grad():
+                predictions = model([{"image": torch.as_tensor(img.transpose(2, 0, 1))}])
+            
+            # Visualize
+            visualizer = Visualizer(img, metadata=metadata, instance_mode=ColorMode.IMAGE)
+            if "instances" in predictions[0]:
+                instances = predictions[0]["instances"].to("cpu")
+                # Filter by confidence threshold for visualization
+                if hasattr(instances, 'scores'):
+                    mask = instances.scores >= args.confidence_threshold
+                    instances = instances[mask]
+                vis_output = visualizer.draw_instance_predictions(instances)
+            else:
+                vis_output = visualizer.output
+            
+            annotated_rgb = vis_output.get_image()
+            
+            # Save
+            save_path = output_path / img_name
+            cv2.imwrite(str(save_path), cv2.cvtColor(annotated_rgb, cv2.COLOR_RGB2BGR))
+
 
 def do_evaluation(cfg, model, args):
     """
@@ -1462,6 +1709,267 @@ def generate_comprehensive_report(all_results, output_dir, args):
     return md_path, csv_path
 
 
+def load_visualization_results(output_dir):
+    """Load previously saved visualization results."""
+    output_dir = Path(output_dir) / "visualizations"
+    
+    if not output_dir.exists():
+        return None
+    
+    results = defaultdict(lambda: defaultdict(list))
+    
+    # Iterate through model directories
+    for model_dir in output_dir.iterdir():
+        if not model_dir.is_dir():
+            continue
+        
+        model_key = model_dir.name
+        
+        # Iterate through dataset directories
+        for dataset_dir in model_dir.iterdir():
+            if not dataset_dir.is_dir():
+                continue
+            
+            dataset_name = dataset_dir.name
+            
+            # Load all images
+            for img_path in sorted(dataset_dir.iterdir()):
+                if img_path.suffix.lower() in ['.png', '.jpg', '.jpeg']:
+                    img = cv2.imread(str(img_path))
+                    if img is not None:
+                        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        results[model_key][dataset_name].append((img_path.name, img_rgb))
+    
+    if not results:
+        return None
+    
+    return dict(results)
+
+
+def create_gallery_view(results, image_name, original_img=None, gt_img=None):
+    """
+    Create gallery view for model comparison.
+    
+    Args:
+        results: Dict of loaded visualization results {model_key: {dataset_name: [(name, img)]}}
+        image_name: Name of image to display
+        original_img: Original image (optional)
+        gt_img: Ground truth annotated image (optional)
+    
+    Returns:
+        numpy array: Gallery image
+    """
+    def find_image(model_key, dataset_key):
+        """Find image for specific model/dataset combination."""
+        if model_key not in results or dataset_key not in results[model_key]:
+            return None
+        for img_name, img in results[model_key][dataset_key]:
+            if img_name == image_name or Path(img_name).stem == Path(image_name).stem:
+                return img
+        return None
+    
+    # Get all model/dataset combinations that actually exist in results
+    model_images = []
+    model_labels = []
+    
+    for model_key, model_info in CONFIG["models"].items():
+        if model_key not in results:
+            continue
+            
+        for dataset_key in model_info.get("evaluate_on", []):
+            dataset_test_name = f"{dataset_key}-test"
+            
+            # Only add if this combination actually exists in results
+            if dataset_test_name not in results[model_key]:
+                continue
+                
+            img = find_image(model_key, dataset_test_name)
+            if img is None:
+                continue
+                
+            model_images.append(img)
+            
+            # Create label
+            model_short = model_key.replace("_", "-").upper()
+            dataset_short = dataset_key.replace("big-images-rev", "BIR").replace("-contrast", "-C")
+            model_labels.append(f"{model_short} on {dataset_short}")
+    
+    if not model_images:
+        print("No visualization results found")
+        return None
+    
+    # Calculate layout
+    target_height = 400
+    spacing = 8
+    
+    def resize_to_height(img, h):
+        """Resize image to target height."""
+        if img is None:
+            return np.ones((h, int(h * 1.5), 3), dtype=np.uint8) * 200
+        old_h, old_w = img.shape[:2]
+        new_w = int(old_w * (h / old_h))
+        return cv2.resize(img, (new_w, h))
+    
+    def add_label(img, text):
+        """Add label bar to image."""
+        labeled = img.copy()
+        label_height = 25
+        label_bar = np.ones((label_height, labeled.shape[1], 3), dtype=np.uint8) * 50
+        cv2.putText(label_bar, text, (5, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        return np.vstack([label_bar, labeled])
+    
+    # Resize and label all model images
+    labeled_images = []
+    for img, label in zip(model_images, model_labels):
+        resized = resize_to_height(img, target_height)
+        labeled = add_label(resized, label)
+        labeled_images.append(labeled)
+    
+    # Create rows (3 columns)
+    n_cols = 3
+    rows = []
+    white_space = np.ones((labeled_images[0].shape[0], spacing, 3), dtype=np.uint8) * 255
+    
+    for i in range(0, len(labeled_images), n_cols):
+        row_imgs = labeled_images[i:i+n_cols]
+        
+        # Pad row if needed
+        while len(row_imgs) < n_cols:
+            row_imgs.append(np.ones_like(labeled_images[0]) * 255)
+        
+        # Stack horizontally with spacing
+        row = row_imgs[0]
+        for img in row_imgs[1:]:
+            row = np.hstack([row, white_space, img])
+        rows.append(row)
+    
+    # Stack rows vertically with spacing
+    row_spacing = np.ones((spacing, rows[0].shape[1], 3), dtype=np.uint8) * 255
+    model_results = rows[0]
+    for row in rows[1:]:
+        model_results = np.vstack([model_results, row_spacing, row])
+    
+    # Create left column with original and GT (if available)
+    if original_img is not None or gt_img is not None:
+        left_images = []
+        
+        if original_img is not None:
+            original_resized = resize_to_height(original_img, target_height)
+            left_images.append(add_label(original_resized, "Original"))
+        
+        if gt_img is not None:
+            gt_resized = resize_to_height(gt_img, target_height)
+            left_images.append(add_label(gt_resized, "Ground Truth"))
+        
+        # Stack left column
+        left_spacing = np.ones((spacing, left_images[0].shape[1], 3), dtype=np.uint8) * 255
+        left_column = left_images[0]
+        for img in left_images[1:]:
+            left_column = np.vstack([left_column, left_spacing, img])
+        
+        # Match heights
+        if left_column.shape[0] < model_results.shape[0]:
+            padding = np.ones((model_results.shape[0] - left_column.shape[0], left_column.shape[1], 3), dtype=np.uint8) * 255
+            left_column = np.vstack([left_column, padding])
+        elif left_column.shape[0] > model_results.shape[0]:
+            padding = np.ones((left_column.shape[0] - model_results.shape[0], model_results.shape[1], 3), dtype=np.uint8) * 255
+            model_results = np.vstack([model_results, padding])
+        
+        # Combine
+        column_spacing = np.ones((left_column.shape[0], spacing * 3, 3), dtype=np.uint8) * 255
+        gallery = np.hstack([left_column, column_spacing, model_results])
+    else:
+        gallery = model_results
+    
+    # Add title
+    title_height = 50
+    title_bar = np.ones((title_height, gallery.shape[1], 3), dtype=np.uint8) * 240
+    cv2.putText(title_bar, f"Model Comparison - {Path(image_name).stem}", (20, 35),
+               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+    
+    gallery = np.vstack([title_bar, gallery])
+    
+    return gallery
+
+
+def display_gallery(args):
+    """Display interactive gallery view of saved visualizations."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # Load visualization results
+    logger.info("Loading visualization results...")
+    results = load_visualization_results(args.output_dir)
+    
+    if results is None:
+        logger.error(f"No visualization results found in {args.output_dir}/visualizations/")
+        logger.error("Please run evaluation first without --gallery flag")
+        return
+    
+    # Get list of images from first available dataset
+    image_list = []
+    for model_key in results:
+        for dataset_name in results[model_key]:
+            image_list = [name for name, _ in results[model_key][dataset_name]]
+            if image_list:
+                break
+        if image_list:
+            break
+    
+    if not image_list:
+        logger.error("No images found in visualization results")
+        return
+    
+    logger.info(f"Found {len(image_list)} images")
+    logger.info("Controls: Arrow keys or A/D to navigate, Q/ESC to quit")
+    
+    window_name = "Model Comparison Gallery - Press 'q' to quit, arrow keys to navigate"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    
+    current_idx = 0
+    
+    while True:
+        image_name = image_list[current_idx]
+        
+        # Try to load original and GT images
+        original_img = None
+        gt_img = None
+        
+        # Find original image path
+        for dataset_name, dataset_info in CONFIG["datasets"].items():
+            if dataset_info.get("format") == "coco":
+                test_path = Path(dataset_info["path"]) / "test"
+                img_path = test_path / image_name
+                if img_path.exists():
+                    original_img = cv2.imread(str(img_path))
+                    if original_img is not None:
+                        original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
+                    break
+        
+        # Create gallery
+        gallery = create_gallery_view(results, image_name, original_img, gt_img)
+        
+        if gallery is None:
+            logger.error(f"Failed to create gallery for {image_name}")
+            break
+        
+        # Display
+        cv2.imshow(window_name, cv2.cvtColor(gallery, cv2.COLOR_RGB2BGR))
+        
+        # Handle keyboard input
+        key = cv2.waitKey(0) & 0xFF
+        
+        if key == ord('q') or key == 27:  # q or ESC
+            break
+        elif key == 83 or key == ord('d'):  # Right arrow or 'd'
+            current_idx = (current_idx + 1) % len(image_list)
+        elif key == 81 or key == ord('a'):  # Left arrow or 'a'
+            current_idx = (current_idx - 1) % len(image_list)
+    
+    cv2.destroyAllWindows()
+    logger.info("Gallery closed")
+
+
 def print_summary_table(all_results, args):
     """Print a summary table of all evaluation results."""
     import logging
@@ -1530,10 +2038,115 @@ def print_summary_table(all_results, args):
     generate_comprehensive_report(all_results, args.output_dir, args)
 
 
+def check_evaluation_exists(args):
+    """Check if evaluation results already exist.
+    
+    Returns:
+        bool: True if all required files exist, False otherwise
+    """
+    output_dir = Path(args.output_dir)
+    
+    # Check if report exists
+    report_path = output_dir / "comprehensive_evaluation_report.md"
+    if not report_path.exists():
+        return False
+    
+    # Check if visualizations exist for all models
+    vis_dir = output_dir / "visualizations"
+    if not vis_dir.exists():
+        return False
+    
+    # Check each model has visualizations
+    for model_key in CONFIG["models"].keys():
+        model_vis_dir = vis_dir / model_key
+        if not model_vis_dir.exists():
+            return False
+        
+        # Check if at least one dataset has images
+        has_images = False
+        for dataset_dir in model_vis_dir.iterdir():
+            if dataset_dir.is_dir() and any(dataset_dir.iterdir()):
+                has_images = True
+                break
+        
+        if not has_images:
+            return False
+    
+    return True
+
+
 def main(args):
     """Main evaluation function."""
     # Setup logger once for the entire run
     logger = setup_logger(name="eval")
+    
+    # Handle predict-only mode
+    if args.predict_only:
+        if not args.input:
+            logger.error("--input is required when using --predict-only")
+            return {}
+        
+        # Collect image paths
+        image_paths = []
+        for path_str in args.input:
+            path = Path(path_str)
+            if path.is_dir():
+                # Add all images in directory
+                for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
+                    image_paths.extend(path.glob(ext))
+                    image_paths.extend(path.glob(ext.upper()))
+            elif path.is_file():
+                image_paths.append(path)
+            else:
+                logger.warning(f"Path not found: {path_str}")
+        
+        if not image_paths:
+            logger.error("No valid images found")
+            return {}
+        
+        logger.info(f"Found {len(image_paths)} images to process")
+        
+        # Process each model
+        for model_key in CONFIG["models"].keys():
+            model_config = CONFIG["models"][model_key]
+            logger.info(f"\n{'='*80}")
+            logger.info(f"Running predictions with: {model_config['name']} ({model_key})")
+            logger.info(f"{'='*80}\n")
+            
+            # Setup configuration
+            cfg = setup_for_model(model_key, args)
+            
+            # Build model
+            if model_config["type"] == "yolo":
+                model = YOLOWrapper(model_config["weights"])
+            else:
+                model = DefaultTrainer.build_model(cfg)
+                DetectionCheckpointer(model).load(cfg.MODEL.WEIGHTS)
+                model.eval()
+            
+            # Run predictions
+            output_dir = Path(args.output_dir) / "predictions" / model_key
+            predict_on_images(model, cfg, image_paths, output_dir, args)
+            
+            # Cleanup
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        logger.info(f"\nAll predictions saved to {args.output_dir}/predictions/")
+        return {}
+    
+    # If gallery mode, check if evaluation exists
+    if args.gallery:
+        if not args.force_eval and check_evaluation_exists(args):
+            logger.info("Evaluation results found. Loading gallery...")
+            display_gallery(args)
+            return {}
+        else:
+            if args.force_eval:
+                logger.info("Force evaluation requested. Running evaluation...")
+            else:
+                logger.info("No evaluation results found. Running evaluation first...")
     
     # Register all datasets once at startup
     register_all_datasets()
@@ -1569,13 +2182,45 @@ def main(args):
                 cfg.MODEL.WEIGHTS, resume=False
             )
         
-        # Run evaluation if requested
+        # Run evaluation
         results = do_evaluation(cfg, model, args)
         all_results[model_key] = results
+        
+        # Always save visualizations (like compare_models_unified.py)
+        logger.info("Saving visualizations...")
+        for dataset_name in (cfg["DATASETS"]["TEST"] if isinstance(cfg, dict) else cfg.DATASETS.TEST):
+            vis_output_dir = os.path.join(args.output_dir, "visualizations", model_key)
+            save_visualizations(model, cfg, dataset_name, vis_output_dir, args)
+        
+        # Check for unlabeled dataset and predict on it
+        unlabeled_config = CONFIG["datasets"].get("unlabeled")
+        if unlabeled_config and unlabeled_config.get("format") == "unlabeled":
+            unlabeled_path = Path(unlabeled_config["path"])
+            if unlabeled_path.exists():
+                # Collect all images
+                image_paths = []
+                for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp']:
+                    image_paths.extend(unlabeled_path.glob(ext))
+                    image_paths.extend(unlabeled_path.glob(ext.upper()))
+                
+                if image_paths:
+                    logger.info(f"\nFound {len(image_paths)} unlabeled images. Running predictions...")
+                    output_dir = Path(args.output_dir) / "visualizations" / model_key / "unlabeled"
+                    predict_on_images(model, cfg, image_paths, output_dir, args)
+        
+        # Cleanup
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
     
     # Print summary table and generate report
     print_summary_table(all_results, args)
+    
+    # If gallery mode was requested, show it now
+    if args.gallery:
+        logger.info("\nEvaluation complete. Opening gallery...")
+        display_gallery(args)
     
     return all_results
 
@@ -1601,6 +2246,27 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Number of GPUs to use for evaluation.",
+    )
+    parser.add_argument(
+        "--gallery",
+        action="store_true",
+        help="Display interactive gallery view. If evaluation results exist, loads them. Otherwise, prompts to run evaluation first.",
+    )
+    parser.add_argument(
+        "--force-eval",
+        action="store_true",
+        help="Force re-evaluation even if results exist. Useful with --gallery to refresh results.",
+    )
+    parser.add_argument(
+        "--predict-only",
+        action="store_true",
+        help="Run inference on unlabeled images without evaluation. Use with --input to specify images.",
+    )
+    parser.add_argument(
+        "--input",
+        nargs="+",
+        type=str,
+        help="Path(s) to input images or directory for prediction (used with --predict-only).",
     )
     
     args = parser.parse_args()
