@@ -5,6 +5,8 @@ This script provides a unified pipeline for evaluating multiple object detection
 instance segmentation models (YOLO, Mask R-CNN, ISTR) with advanced visualization and 
 comparison capabilities.
 
+Note: Supports only COCO-format datasets for evaluation.
+
 Features:
 - Automatic evaluation of multiple models on multiple datasets
 - COCO metrics (AP, AP50, AP75, per-class, scale-based)
@@ -109,17 +111,18 @@ Configuration Example:
 
 import os
 import csv
-import argparse
+import cv2
 import glob
 import time
-import cv2
+import json
+import logging
+import argparse
 import numpy as np
 from tqdm import tqdm
-from collections import OrderedDict, defaultdict
-import json
 import csv as csv_module
 from pathlib import Path
 from datetime import datetime
+from collections import OrderedDict, defaultdict
 
 import torch
 import detectron2.utils.comm as comm
@@ -129,7 +132,7 @@ from detectron2.data import MetadataCatalog, build_detection_test_loader, Datase
 from detectron2.data.detection_utils import read_image
 from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, launch
 from detectron2.evaluation import COCOEvaluator, inference_on_dataset, print_csv_format, DatasetEvaluator
-from detectron2.utils.logger import setup_logger
+from detectron2.utils.logger import setup_logger, log_first_n
 from detectron2.utils.visualizer import Visualizer, ColorMode
 from detectron2.structures import Boxes, Instances
 
@@ -725,11 +728,9 @@ def do_evaluation(cfg, model, args):
         args: command line arguments
     
     Returns:
-        dict: evaluation results (COCO metrics + YOLO-style metrics)
+        dict: evaluation results (COCO metrics + YOLO-style metrics + inference times)
     """
     results = {}
-    from detectron2.utils.logger import log_first_n
-    import logging
     logger = logging.getLogger(__name__)
     
     # Handle YOLO models (cfg is a dict)
@@ -749,7 +750,33 @@ def do_evaluation(cfg, model, args):
                 dataset_name, 
                 output_dir=os.path.join(output_dir, "inference", dataset_name)
             )
+            
+            # Track total inference time for the dataset
+            start_time = time.time()
             results_i = inference_on_dataset(model, data_loader, evaluator)
+            total_inference_time = time.time() - start_time
+            
+            # Get dataset size for average calculation
+            dataset_dict = DatasetCatalog.get(dataset_name)
+            num_images = len(dataset_dict) if dataset_dict else 0
+            
+            # Store timing statistics
+            if num_images > 0:
+                avg_time_seconds = total_inference_time / num_images
+                timing_stats = {
+                    'total_time': total_inference_time,
+                    'avg_time_per_image_ms': avg_time_seconds * 1000,  # Convert to milliseconds
+                    'images_per_second': num_images / total_inference_time,  # Hz
+                    'num_images': num_images
+                }
+                results_i['inference_times'] = timing_stats
+                
+                if comm.is_main_process():
+                    logger.info(f"\nInference Timing:")
+                    logger.info(f"  Total time: {timing_stats['total_time']:.2f}s")
+                    logger.info(f"  Avg per image: {timing_stats['avg_time_per_image_ms']:.2f}ms")
+                    logger.info(f"  Throughput: {timing_stats['images_per_second']:.2f} images/s")
+                    logger.info(f"  Images: {timing_stats['num_images']}")
             
             # Compute YOLO-style metrics
             inference_dir = os.path.join(output_dir, "inference", dataset_name)
@@ -784,7 +811,33 @@ def do_evaluation(cfg, model, args):
             evaluator = Trainer.build_evaluator(
                 cfg, dataset_name, os.path.join(cfg.OUTPUT_DIR, "inference", dataset_name)
             )
+            
+            # Track total inference time for the dataset
+            start_time = time.time()
             results_i = inference_on_dataset(model, data_loader, evaluator)
+            total_inference_time = time.time() - start_time
+            
+            # Get dataset size for average calculation
+            dataset_dict = DatasetCatalog.get(dataset_name)
+            num_images = len(dataset_dict) if dataset_dict else 0
+            
+            # Store timing statistics
+            if num_images > 0:
+                avg_time_seconds = total_inference_time / num_images
+                timing_stats = {
+                    'total_time': total_inference_time,
+                    'avg_time_per_image_ms': avg_time_seconds * 1000,  # Convert to milliseconds
+                    'images_per_second': num_images / total_inference_time,  # Hz
+                    'num_images': num_images
+                }
+                results_i['inference_times'] = timing_stats
+                
+                if comm.is_main_process():
+                    logger.info(f"\nInference Timing:")
+                    logger.info(f"  Total time: {timing_stats['total_time']:.2f}s")
+                    logger.info(f"  Avg per image: {timing_stats['avg_time_per_image_ms']:.2f}ms")
+                    logger.info(f"  Throughput: {timing_stats['images_per_second']:.2f} images/s")
+                    logger.info(f"  Images: {timing_stats['num_images']}")
             
             # Compute YOLO-style metrics
             inference_dir = os.path.join(cfg.OUTPUT_DIR, "inference", dataset_name)
@@ -1491,6 +1544,45 @@ def generate_comprehensive_report(all_results, output_dir, args):
             f.write("\n")
         else:
             f.write("*No segmentation evaluation results available.*\n\n")
+        
+        # Inference Timing
+        f.write("\n## Inference Timing\n\n")
+        f.write("*Inference time statistics per model/dataset combination (in seconds)*\n\n")
+        
+        # Collect timing data
+        timing_data = []
+        for model_key, dataset_results in all_results.items():
+            model_name = CONFIG["models"][model_key]["name"]
+            for dataset_name, metrics in dataset_results.items():
+                if 'inference_times' in metrics:
+                    timing = metrics['inference_times']
+                    timing_data.append({
+                        'model': model_name,
+                        'dataset': dataset_name.replace('-test', ''),
+                        'total': timing['total_time'],
+                        'avg_ms': timing['avg_time_per_image_ms'],
+                        'hz': timing['images_per_second'],
+                        'images': timing['num_images']
+                    })
+        
+        if timing_data:
+            headers = ["Model", "Dataset", "Total Time (s)", "Avg per Image (ms)", "Throughput (img/s)", "Images"]
+            f.write("| " + " | ".join(headers) + " |\n")
+            f.write("| " + " | ".join(["---"] * len(headers)) + " |\n")
+            
+            for t in timing_data:
+                row = [
+                    t['model'],
+                    t['dataset'],
+                    f"{t['total']:.2f}",
+                    f"{t['avg_ms']:.2f}",
+                    f"{t['hz']:.2f}",
+                    str(t['images'])
+                ]
+                f.write("| " + " | ".join(row) + " |\n")
+            f.write("\n")
+        else:
+            f.write("*No timing data available.*\n\n")
         
         # YOLO-Style Metrics
         f.write("\n## YOLO-Style Metrics @ IoU=0.5\n\n")
