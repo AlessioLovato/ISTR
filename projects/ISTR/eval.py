@@ -646,6 +646,100 @@ def predict_on_images(model, cfg, image_paths, output_dir, args):
     
     logger.info(f"Predictions saved to {output_path}")
 
+def create_coco_annotations(image_path, coco_json_path, class_names=None, show_masks=True, show_boxes=True):
+    """
+    Overlay ground truth annotations on images.
+
+    Args:
+        image_path: Path to the image file
+        coco_json_path: Path to the COCO JSON annotation file
+        class_names: List of class names (default: ["positive", "negative", "lines"])
+        show_masks: Whether to show segmentation masks
+        show_boxes: Whether to show bounding boxes
+
+    Returns:
+        numpy.ndarray: Annotated image in RGB format
+    """
+    if class_names is None:
+        class_names = ["positive", "negative", "lines"]
+    
+    # Define colors for each class (RGB format) - scale to 0-255
+    colors_normalized = sns.color_palette("husl", len(class_names))
+    colors = [(int(r * 255), int(g * 255), int(b * 255)) for r, g, b in colors_normalized]
+
+    # Load image
+    img = cv2.imread(str(image_path))
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    # Load COCO annotations
+    coco = COCO(str(coco_json_path))
+
+    # Find image in COCO dataset
+    img_name = image_path.name
+    img_ids = []
+    for img_id, img_info in coco.imgs.items():
+        if Path(img_info['file_name']).name == img_name:
+            img_ids.append(img_id)
+            break
+    
+    if not img_ids:
+        print(f"Warning: Image {img_name} not found in COCO annotations")
+        return img_rgb
+    
+    img_id = img_ids[0]
+    
+    # Get annotations for this image
+    ann_ids = coco.getAnnIds(imgIds=[img_id])
+    anns = coco.loadAnns(ann_ids)
+    
+    # Create overlay for masks
+    overlay = img_rgb.copy()
+    
+    # Draw each annotation
+    for ann in anns:
+        category_id = ann['category_id']
+        
+        # Ensure category_id is within range
+        if category_id >= len(colors):
+            color = (128, 128, 128)  # Gray for unknown classes
+        else:
+            color = colors[category_id]
+        
+        # Draw segmentation mask
+        if show_masks and 'segmentation' in ann:
+            seg = ann['segmentation']
+            
+            # Handle different segmentation formats
+            if isinstance(seg, list):
+                # Polygon format
+                for polygon in seg:
+                    if len(polygon) >= 6:  # At least 3 points (x,y pairs)
+                        pts = np.array(polygon).reshape(-1, 2).astype(np.int32)
+                        cv2.fillPoly(overlay, [pts], color)
+            elif isinstance(seg, dict):
+                # RLE format
+                if isinstance(seg.get('counts'), list):
+                    # Uncompressed RLE
+                    h, w = ann.get('height', img_rgb.shape[0]), ann.get('width', img_rgb.shape[1])
+                    rle = maskUtils.frPyObjects(seg, h, w)
+                else:
+                    rle = seg
+                
+                mask = maskUtils.decode(rle)
+                overlay[mask > 0] = color
+        
+        # Draw bounding box
+        if show_boxes and 'bbox' in ann:
+            x, y, w, h = ann['bbox']
+            x, y, w, h = int(x), int(y), int(w), int(h)
+            cv2.rectangle(img_rgb, (x, y), (x + w, y + h), color, 2)
+    
+    # Blend overlay with original image
+    if show_masks:
+        alpha = 0.4
+        img_rgb = cv2.addWeighted(overlay, alpha, img_rgb, 1 - alpha, 0)
+    
+    return img_rgb
 
 def save_visualizations(model, cfg, dataset_name, output_dir, args):
     """
@@ -669,20 +763,38 @@ def save_visualizations(model, cfg, dataset_name, output_dir, args):
     dataset_dict = DatasetCatalog.get(dataset_name)
     metadata = MetadataCatalog.get(dataset_name)
     
+    # Create ground truth visualization directory (save once per dataset)
+    gt_output_path = Path(output_dir).parent / "ground_truth" / dataset_name
+    gt_output_path.mkdir(parents=True, exist_ok=True)
+    
     logger.info(f"Saving visualizations to {output_path}...")
+    logger.info(f"Saving ground truth to {gt_output_path}...")
     
     # Handle YOLO models (check if it's a YOLOWrapper)
     if isinstance(model, YOLOWrapper):
         for item in tqdm(dataset_dict, desc=f"Visualizing {dataset_name}"):
             img_path = item["file_name"]
-            img_name = Path(img_path).name
+            img_name = Path(img_path).stem + ".png"
+            
+            # Extract base dataset name (remove '-test' suffix)
+            base_dataset_name = dataset_name.replace('-test', '')
+            dataset_path = CONFIG["datasets"][base_dataset_name]["path"]
+            coco_annotation_path = f"{dataset_path}/test/_annotations.coco.json"
+
+            # Save ground truth visualization (only if not already saved)
+            gt_save_path = gt_output_path / img_name
+            if not gt_save_path.exists():
+                gt_rgb = create_coco_annotations(image_path=Path(img_path),
+                                        coco_json_path=coco_annotation_path,
+                                        class_names=metadata.get("thing_classes", ["positive", "negative", "lines"]))
+                cv2.imwrite(str(gt_save_path), cv2.cvtColor(gt_rgb, cv2.COLOR_RGB2BGR))
             
             # Run YOLO inference - use the wrapped model
             results = model.model(img_path, conf=args.confidence_threshold, verbose=False)
             annotated_img = results[0].plot()  # BGR format
             annotated_rgb = cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)
             
-            # Save
+            # Save prediction as PNG
             save_path = output_path / img_name
             cv2.imwrite(str(save_path), cv2.cvtColor(annotated_rgb, cv2.COLOR_RGB2BGR))
     else:
@@ -690,16 +802,29 @@ def save_visualizations(model, cfg, dataset_name, output_dir, args):
         model.eval()  # Ensure model is in eval mode
         for item in tqdm(dataset_dict, desc=f"Visualizing {dataset_name}"):
             img_path = item["file_name"]
-            img_name = Path(img_path).name
+            img_name = Path(img_path).stem + ".png"
+            
+            # Extract base dataset name (remove '-test' suffix)
+            base_dataset_name = dataset_name.replace('-test', '')
+            dataset_path = CONFIG["datasets"][base_dataset_name]["path"]
+            coco_annotation_path = f"{dataset_path}/test/_annotations.coco.json"
             
             # Load image
             img = read_image(img_path, format="RGB")
+            
+            # Save ground truth visualization (only if not already saved)
+            gt_save_path = gt_output_path / img_name
+            if not gt_save_path.exists():
+                gt_rgb = create_coco_annotations(image_path=Path(img_path),
+                                        coco_json_path=coco_annotation_path,
+                                        class_names=metadata.get("thing_classes", ["positive", "negative", "lines"]))
+                cv2.imwrite(str(gt_save_path), cv2.cvtColor(gt_rgb, cv2.COLOR_RGB2BGR))
             
             # Run inference
             with torch.no_grad():
                 predictions = model([{"image": torch.as_tensor(img.transpose(2, 0, 1))}])
             
-            # Visualize
+            # Visualize predictions
             visualizer = Visualizer(img, metadata=metadata, instance_mode=ColorMode.IMAGE)
             if "instances" in predictions[0]:
                 instances = predictions[0]["instances"].to("cpu")
@@ -713,7 +838,7 @@ def save_visualizations(model, cfg, dataset_name, output_dir, args):
             
             annotated_rgb = vis_output.get_image()
             
-            # Save
+            # Save prediction as PNG
             save_path = output_path / img_name
             cv2.imwrite(str(save_path), cv2.cvtColor(annotated_rgb, cv2.COLOR_RGB2BGR))
 
@@ -1841,6 +1966,7 @@ def load_visualization_results(output_dir):
 def create_gallery_view(results, image_name, original_img=None, gt_img=None):
     """
     Create gallery view for model comparison.
+    Shows original image on top, annotated prediction below, with 2 models per row.
     
     Args:
         results: Dict of loaded visualization results {model_key: {dataset_name: [(name, img)]}}
@@ -1860,126 +1986,222 @@ def create_gallery_view(results, image_name, original_img=None, gt_img=None):
                 return img
         return None
     
-    # Get all model/dataset combinations that actually exist in results
-    model_images = []
-    model_labels = []
+    def create_color_legend(width, height=60):
+        """Create a color legend for the three classes."""
+        legend = np.ones((height, width, 3), dtype=np.uint8) * 255
+        
+        # Define class colors using seaborn husl palette (matching ground truth)
+        class_names = ["Positive", "Negative", "Lines"]
+        colors_normalized = sns.color_palette("husl", len(class_names))
+        colors_rgb = [(int(r * 255), int(g * 255), int(b * 255)) for r, g, b in colors_normalized]
+        
+        classes = [
+            (class_names[0], colors_rgb[0]),
+            (class_names[1], colors_rgb[1]),
+            (class_names[2], colors_rgb[2])
+        ]
+        
+        # Calculate spacing
+        box_size = 20
+        start_x = 10
+        spacing_x = width // 3
+        y_pos = height // 2 - box_size // 2
+        
+        for i, (class_name, color) in enumerate(classes):
+            x_pos = start_x + i * spacing_x
+            
+            # Draw colored box
+            cv2.rectangle(legend, (x_pos, y_pos), (x_pos + box_size, y_pos + box_size), color, -1)
+            cv2.rectangle(legend, (x_pos, y_pos), (x_pos + box_size, y_pos + box_size), (0, 0, 0), 1)
+            
+            # Draw text label
+            cv2.putText(legend, class_name, (x_pos + box_size + 5, y_pos + 15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+        
+        return legend
+    
+    # Organize results by model and dataset
+    # Structure: {model_key: {dataset_key: img}}
+    model_dataset_grid = {}
+    all_models = []
+    all_datasets = []
     
     for model_key, model_info in CONFIG["models"].items():
         if model_key not in results:
             continue
+        
+        if model_key not in model_dataset_grid:
+            model_dataset_grid[model_key] = {}
+            all_models.append(model_key)
             
         for dataset_key in model_info.get("evaluate_on", []):
             dataset_test_name = f"{dataset_key}-test"
             
-            # Only add if this combination actually exists in results
             if dataset_test_name not in results[model_key]:
                 continue
                 
             img = find_image(model_key, dataset_test_name)
             if img is None:
                 continue
-                
-            model_images.append(img)
             
-            # Create label
-            model_short = model_key.replace("_", "-").upper()
-            dataset_short = dataset_key.replace("big-images-rev", "BIR").replace("-contrast", "-C")
-            model_labels.append(f"{model_short} on {dataset_short}")
+            model_dataset_grid[model_key][dataset_key] = img
+            if dataset_key not in all_datasets:
+                all_datasets.append(dataset_key)
+        
+        # Also check for unlabeled images
+        if "unlabeled" in results[model_key]:
+            unlabeled_img = find_image(model_key, "unlabeled")
+            if unlabeled_img is not None:
+                model_dataset_grid[model_key]["unlabeled"] = unlabeled_img
+                if "unlabeled" not in all_datasets:
+                    all_datasets.append("unlabeled")
     
-    if not model_images:
+    if not model_dataset_grid:
         print("No visualization results found")
         return None
     
-    # Calculate layout
-    target_height = 400
-    spacing = 8
-    
-    def resize_to_height(img, h):
-        """Resize image to target height."""
-        if img is None:
-            return np.ones((h, int(h * 1.5), 3), dtype=np.uint8) * 200
-        old_h, old_w = img.shape[:2]
-        new_w = int(old_w * (h / old_h))
-        return cv2.resize(img, (new_w, h))
+    # Keep images at original size - no resizing
+    spacing = 20
     
     def add_label(img, text):
         """Add label bar to image."""
+        if img is None:
+            return None
         labeled = img.copy()
-        label_height = 25
+        label_height = 30
         label_bar = np.ones((label_height, labeled.shape[1], 3), dtype=np.uint8) * 50
-        cv2.putText(label_bar, text, (5, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        cv2.putText(label_bar, text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         return np.vstack([label_bar, labeled])
     
-    # Resize and label all model images
-    labeled_images = []
-    for img, label in zip(model_images, model_labels):
-        resized = resize_to_height(img, target_height)
-        labeled = add_label(resized, label)
-        labeled_images.append(labeled)
+    # Keep original sizes - just organize the grid
+    processed_grid = {}
+    for model_key in all_models:
+        processed_grid[model_key] = {}
+        for dataset_key in all_datasets:
+            if dataset_key in model_dataset_grid[model_key]:
+                img = model_dataset_grid[model_key][dataset_key]
+                processed_grid[model_key][dataset_key] = img
+            else:
+                # Empty cell
+                processed_grid[model_key][dataset_key] = None
     
-    # Create rows (3 columns)
-    n_cols = 3
-    rows = []
-    white_space = np.ones((labeled_images[0].shape[0], spacing, 3), dtype=np.uint8) * 255
+    # Prepare first column: Original and GT at original size
+    if original_img is None:
+        # Use first available image size as reference
+        ref_img = None
+        for model_key in all_models:
+            for dataset_key in all_datasets:
+                if dataset_key in model_dataset_grid[model_key]:
+                    ref_img = model_dataset_grid[model_key][dataset_key]
+                    break
+            if ref_img is not None:
+                break
+        if ref_img is not None:
+            original_img = np.ones_like(ref_img) * 200
+        else:
+            original_img = np.ones((600, 800, 3), dtype=np.uint8) * 200
     
-    for i in range(0, len(labeled_images), n_cols):
-        row_imgs = labeled_images[i:i+n_cols]
-        
-        # Pad row if needed
-        while len(row_imgs) < n_cols:
-            row_imgs.append(np.ones_like(labeled_images[0]) * 255)
-        
-        # Stack horizontally with spacing
-        row = row_imgs[0]
-        for img in row_imgs[1:]:
-            row = np.hstack([row, white_space, img])
-        rows.append(row)
+    if gt_img is None:
+        gt_img = np.ones_like(original_img) * 200
     
-    # Stack rows vertically with spacing
-    row_spacing = np.ones((spacing, rows[0].shape[1], 3), dtype=np.uint8) * 255
-    model_results = rows[0]
-    for row in rows[1:]:
-        model_results = np.vstack([model_results, row_spacing, row])
+    # Build the grid table
+    # Column 1: Original (top) and GT (bottom)
+    # Other columns: Rows of 2 models each, each model showing all dataset variants horizontally
     
-    # Create left column with original and GT (if available)
-    if original_img is not None or gt_img is not None:
-        left_images = []
+    # Create first column with Original and GT stacked vertically
+    orig_labeled = add_label(original_img, "Original")
+    gt_labeled = add_label(gt_img, "Ground Truth")
+    
+    # Stack them vertically with spacing
+    vert_spacing = np.ones((spacing * 3, orig_labeled.shape[1], 3), dtype=np.uint8) * 255
+    first_column = np.vstack([orig_labeled, vert_spacing, gt_labeled])
+    
+    # Build model rows (2 models per row)
+    models_per_row = 2
+    model_rows = []
+    # Get reference image height for spacing
+    ref_height = None
+    for model_key in all_models:
+        for dataset_key in all_datasets:
+            if dataset_key in model_dataset_grid[model_key]:
+                ref_height = processed_grid[model_key][dataset_key].shape[0] + 30
+                break
+        if ref_height is not None:
+            break
+    if ref_height is None:
+        ref_height = 600
+    white_space_horiz = np.ones((ref_height, spacing, 3), dtype=np.uint8) * 255
+    
+    for i in range(0, len(all_models), models_per_row):
+        row_models = all_models[i:i+models_per_row]
         
-        if original_img is not None:
-            original_resized = resize_to_height(original_img, target_height)
-            left_images.append(add_label(original_resized, "Original"))
+        # Build each model's variants horizontally
+        model_strips = []
+        for model_key in row_models:
+            # Get all dataset variants for this model
+            variants = []
+            for dataset_key in all_datasets:
+                if dataset_key in model_dataset_grid[model_key]:
+                    img = processed_grid[model_key][dataset_key]
+                    model_short = model_key.replace("_", "-").upper()
+                    dataset_short = dataset_key.replace("big-images-rev", "BIR").replace("-contrast", "-C")
+                    labeled = add_label(img, f"{model_short}: {dataset_short}")
+                    variants.append(labeled)
+            
+            # Stack variants horizontally
+            if variants:
+                model_strip = variants[0]
+                for v in variants[1:]:
+                    model_strip = np.hstack([model_strip, white_space_horiz, v])
+                model_strips.append(model_strip)
         
-        if gt_img is not None:
-            gt_resized = resize_to_height(gt_img, target_height)
-            left_images.append(add_label(gt_resized, "Ground Truth"))
+        # If we have less than 2 models in this row, pad with empty space
+        if len(model_strips) < models_per_row:
+            empty = np.ones_like(model_strips[0]) * 255
+            model_strips.append(empty)
         
-        # Stack left column
-        left_spacing = np.ones((spacing, left_images[0].shape[1], 3), dtype=np.uint8) * 255
-        left_column = left_images[0]
-        for img in left_images[1:]:
-            left_column = np.vstack([left_column, left_spacing, img])
+        # Stack the two model strips horizontally with more spacing
+        wider_spacing = np.ones((model_strips[0].shape[0], spacing * 3, 3), dtype=np.uint8) * 255
+        row_content = model_strips[0]
+        for strip in model_strips[1:]:
+            row_content = np.hstack([row_content, wider_spacing, strip])
         
-        # Match heights
-        if left_column.shape[0] < model_results.shape[0]:
-            padding = np.ones((model_results.shape[0] - left_column.shape[0], left_column.shape[1], 3), dtype=np.uint8) * 255
-            left_column = np.vstack([left_column, padding])
-        elif left_column.shape[0] > model_results.shape[0]:
-            padding = np.ones((left_column.shape[0] - model_results.shape[0], model_results.shape[1], 3), dtype=np.uint8) * 255
-            model_results = np.vstack([model_results, padding])
+        model_rows.append(row_content)
+    
+    # Stack model rows vertically
+    if model_rows:
+        row_spacing_vert = np.ones((spacing * 2, model_rows[0].shape[1], 3), dtype=np.uint8) * 255
+        right_side = model_rows[0]
+        for row in model_rows[1:]:
+            right_side = np.vstack([right_side, row_spacing_vert, row])
         
-        # Combine
-        column_spacing = np.ones((left_column.shape[0], spacing * 3, 3), dtype=np.uint8) * 255
-        gallery = np.hstack([left_column, column_spacing, model_results])
+        # Ensure first column matches the height of right side
+        if first_column.shape[0] < right_side.shape[0]:
+            padding_height = right_side.shape[0] - first_column.shape[0]
+            padding = np.ones((padding_height, first_column.shape[1], 3), dtype=np.uint8) * 255
+            first_column = np.vstack([first_column, padding])
+        elif first_column.shape[0] > right_side.shape[0]:
+            padding_height = first_column.shape[0] - right_side.shape[0]
+            padding = np.ones((padding_height, right_side.shape[1], 3), dtype=np.uint8) * 255
+            right_side = np.vstack([right_side, padding])
+        
+        # Combine first column with model rows
+        column_spacing = np.ones((first_column.shape[0], spacing * 3, 3), dtype=np.uint8) * 255
+        gallery = np.hstack([first_column, column_spacing, right_side])
     else:
-        gallery = model_results
+        gallery = first_column
     
-    # Add title
+    # Add title bar
     title_height = 50
     title_bar = np.ones((title_height, gallery.shape[1], 3), dtype=np.uint8) * 240
     cv2.putText(title_bar, f"Model Comparison - {Path(image_name).stem}", (20, 35),
                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
     
-    gallery = np.vstack([title_bar, gallery])
+    # Add color legend at the bottom
+    legend = create_color_legend(gallery.shape[1], height=60)
+    
+    # Combine all parts: title + gallery + legend
+    gallery = np.vstack([title_bar, gallery, legend])
     
     return gallery
 
@@ -1998,15 +2220,27 @@ def display_gallery(args):
         logger.error("Please run evaluation first without --gallery flag")
         return
     
-    # Get list of images from first available dataset
+    # Get list of images from first available dataset (excluding unlabeled)
     image_list = []
     for model_key in results:
         for dataset_name in results[model_key]:
-            image_list = [name for name, _ in results[model_key][dataset_name]]
-            if image_list:
-                break
+            if dataset_name != "unlabeled":
+                image_list = [name for name, _ in results[model_key][dataset_name]]
+                if image_list:
+                    break
         if image_list:
             break
+    
+    # Add unlabeled images to the list (if any exist)
+    unlabeled_images = []
+    for model_key in results:
+        if "unlabeled" in results[model_key]:
+            unlabeled_images = [name for name, _ in results[model_key]["unlabeled"]]
+            break
+    
+    if unlabeled_images:
+        logger.info(f"Found {len(unlabeled_images)} unlabeled images")
+        image_list.extend(unlabeled_images)
     
     if not image_list:
         logger.error("No images found in visualization results")
@@ -2023,20 +2257,62 @@ def display_gallery(args):
     while True:
         image_name = image_list[current_idx]
         
-        # Try to load original and GT images
+        # Check if this is an unlabeled image
+        is_unlabeled = False
+        for model_key in results:
+            if "unlabeled" in results[model_key]:
+                unlabeled_names = [name for name, _ in results[model_key]["unlabeled"]]
+                if image_name in unlabeled_names:
+                    is_unlabeled = True
+                    break
+        
+        # Try to load original and GT images (skip for unlabeled)
         original_img = None
         gt_img = None
+        image_name_original = image_name.replace(".png", ".jpg")
+
         
-        # Find original image path
-        for dataset_name, dataset_info in CONFIG["datasets"].items():
-            if dataset_info.get("format") == "coco":
-                test_path = Path(dataset_info["path"]) / "test"
-                img_path = test_path / image_name
-                if img_path.exists():
-                    original_img = cv2.imread(str(img_path))
-                    if original_img is not None:
-                        original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
-                    break
+        # Find original image path and GT visualization
+        if not is_unlabeled:
+            for dataset_name, dataset_info in CONFIG["datasets"].items():
+                if dataset_info.get("format") == "coco":
+                    test_path = Path(dataset_info["path"]) / "test"
+                    img_path = test_path / image_name_original
+                    if img_path.exists():
+                        # Load original image
+                        original_img = cv2.imread(str(img_path))
+                        if original_img is not None:
+                            original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
+                        
+                        # Load ground truth visualization (with -test suffix to match save location)
+                        gt_vis_dir = Path(args.output_dir) / "visualizations" / "ground_truth" / f"{dataset_name}-test"
+                        gt_img_name = Path(image_name).stem + ".png"
+                        gt_img_path = gt_vis_dir / gt_img_name
+                        
+                        logger.info(f"Looking for GT at: {gt_img_path}")
+                        if gt_img_path.exists():
+                            gt_img = cv2.imread(str(gt_img_path))
+                            if gt_img is not None:
+                                gt_img = cv2.cvtColor(gt_img, cv2.COLOR_BGR2RGB)
+                                logger.info(f"Successfully loaded GT image: {gt_img.shape}")
+                            else:
+                                logger.warning(f"Failed to read GT image from {gt_img_path}")
+                        else:
+                            logger.warning(f"GT image not found at {gt_img_path}")
+                        break
+                    else:
+                        logger.warning(f"Original image not found: {img_path}")
+        elif is_unlabeled:
+            unlabeled_path = Path(CONFIG["datasets"]["unlabeled"]["path"])
+            img_path = unlabeled_path / image_name_original
+            if img_path.exists():
+                original_img = cv2.imread(str(img_path))
+                if original_img is not None:
+                    original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
+                else:
+                    logger.warning(f"Failed to read unlabeled original image from {img_path}")
+            else:
+                logger.warning(f"Unlabeled original image not found: {img_path}")
         
         # Create gallery
         gallery = create_gallery_view(results, image_name, original_img, gt_img)
@@ -2049,14 +2325,21 @@ def display_gallery(args):
         cv2.imshow(window_name, cv2.cvtColor(gallery, cv2.COLOR_RGB2BGR))
         
         # Handle keyboard input
-        key = cv2.waitKey(0) & 0xFF
+        key = cv2.waitKey(0)
+        key_code = key & 0xFF
         
-        if key == ord('q') or key == 27:  # q or ESC
+        logger.info(f"Key pressed: {key} (masked: {key_code}) - Image {current_idx + 1}/{len(image_list)}: {image_name}")
+        
+        if key_code == ord('q') or key_code == 27:  # q or ESC
             break
-        elif key == 83 or key == ord('d'):  # Right arrow or 'd'
+        elif key_code == ord('d') or key == 65363 or key == 2555904:  # 'd' or Right arrow (different systems)
+            old_idx = current_idx
             current_idx = (current_idx + 1) % len(image_list)
-        elif key == 81 or key == ord('a'):  # Left arrow or 'a'
+            logger.info(f"Moving forward from image {old_idx + 1} to {current_idx + 1}")
+        elif key_code == ord('a') or key == 65361 or key == 2424832:  # 'a' or Left arrow (different systems)
+            old_idx = current_idx
             current_idx = (current_idx - 1) % len(image_list)
+            logger.info(f"Moving backward from image {old_idx + 1} to {current_idx + 1}")
     
     cv2.destroyAllWindows()
     logger.info("Gallery closed")
