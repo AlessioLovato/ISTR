@@ -13,7 +13,7 @@ from detectron2.engine import AutogradProfiler, DefaultTrainer, default_argument
 from detectron2.evaluation import COCOEvaluator, CityscapesInstanceEvaluator, verify_results#, LVISEvaluator
 from detectron2.solver.build import maybe_add_gradient_clipping
 
-from istr import ISTRDatasetMapper, add_ISTR_config, register_dataset_from_args
+from istr import ISTRDatasetMapper, add_ISTR_config
 from detectron2.data.datasets import register_coco_instances
 
 
@@ -108,11 +108,11 @@ def setup(args):
     # Register COCO datasets if specified in args
     if hasattr(args, "dataset_folder") and args.dataset_folder:
         train_path = args.dataset_folder + "/train"
-        val_path = args.dataset_folder + "/val"
+        val_path = args.dataset_folder + "/test"
         register_coco_instances(args.dataset_folder.split("/")[0] + "-train", {}, train_path + "/_annotations.coco.json", train_path)
-        register_coco_instances(args.dataset_folder.split("/")[0] + "-val", {}, val_path + "/_annotations.coco.json", val_path)
+        register_coco_instances(args.dataset_folder.split("/")[0] + "-test", {}, val_path + "/_annotations.coco.json", val_path)
         cfg.DATASETS.TRAIN = (args.dataset_folder.split("/")[0] + "-train",)
-        cfg.DATASETS.TEST = (args.dataset_folder.split("/")[0] + "-val",)
+        cfg.DATASETS.TEST = (args.dataset_folder.split("/")[0] + "-test",)
     # Add wandb config if specified
     if hasattr(args, "wandb_project") and args.wandb_project:
         cfg.WANDB_PROJECT = args.wandb_project
@@ -145,22 +145,22 @@ if __name__ == "__main__":
     parser = default_argument_parser()
     
     # Add custom dataset arguments
-        args.add_argument(
+    parser.add_argument(
         "--dataset-folder",
         type=str,
         help="Path to a COCO format dataset JSON file to register.",
     )
-    args.add_argument(
+    parser.add_argument(
         "--wandb-project",
         type=str,
         help="Name of the Weights & Biases project.",
     )
-    args.add_argument(
+    parser.add_argument(
         "--wandb-run-name",
         type=str,
         help="Name of the Weights & Biases run.",
     )
-    args.add_argument(
+    parser.add_argument(
         "--output-dir",
         default="output",
         type=str,
