@@ -30,7 +30,14 @@ pip3 install opencv-python scipy shapely torch_dct timm
 git clone https://github.com/AlessioLovato/ISTR.git
 ```
 
-4. Install the repo
+4. Install the repo [in VEVN]
+```bash
+cd ISTR
+pip install -e detectron2
+pip install -e .
+```
+
+4. Install the repo [in DOCKER]
 ```bash
 cd ISTR
 pip install -e detectron2 --no-build-isolation
