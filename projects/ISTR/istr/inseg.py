@@ -73,7 +73,7 @@ class ISTR(nn.Module):
             self.mask_D = Decoder(self.mask_size, self.mask_feat_dim)
 
             checkpoint_path = cfg.MODEL.ISTR.PATH_COMPONENTS
-            checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+            checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
             self.mask_E.load_state_dict(checkpoint['E'])
             self.mask_D.load_state_dict(checkpoint['D'])
 
