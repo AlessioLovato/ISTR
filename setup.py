@@ -97,50 +97,13 @@ istr_packages = find_packages(where="projects/ISTR", exclude=("test*", "demo*"))
 # Get absolute path to detectron2 subdirectory for installation
 detectron2_path = Path(__file__).parent.absolute() / "detectron2"
 
+# Use PEP 621 metadata from pyproject.toml. Keep only custom commands here.
 setup(
-    name="istr",
-    version=get_istr_version(),
-    author="ISTR Authors",
-    url="https://github.com/hujiecpp/ISTR",
-    description="ISTR: End-to-End Instance Segmentation with Transformers",
-    long_description="ISTR is an end-to-end instance segmentation method built on Detectron2.",
-    packages=istr_packages,
-    package_dir={"": "projects/ISTR"},
-    include_package_data=True,
-    python_requires=">=3.8",
-    install_requires=[
-        # Install detectron2 from local subdirectory using absolute file:// URL
-        f"detectron2 @ file://{detectron2_path}",
-        # ISTR-specific dependencies
-        "torch>=1.8",
-        "torchvision",
-        "opencv-python",
-        "scipy",
-        "shapely",
-        "torch_dct",
-        "timm",
-    ],
-    extras_require={
-        "dev": [
-            "black==22.3.0",
-            "flake8",
-            "isort",
-        ],
-    },
+    # setuptools will read metadata (name, version, dependencies, packages, etc.)
+    # from `pyproject.toml` (PEP 621). We keep custom build/develop commands here
+    # so they run during `pip install -e .` or builds.
     cmdclass={
         "develop": CustomDevelop,
         "build_py": CustomBuildPy,
     },
-    classifiers=[
-        "Development Status :: 4 - Beta",
-        "Intended Audience :: Developers",
-        "Intended Audience :: Science/Research",
-        "License :: OSI Approved :: Apache Software License",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    ],
 )

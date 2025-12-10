@@ -33,5 +33,6 @@ git clone https://github.com/AlessioLovato/ISTR.git
 4. Install the repo
 ```bash
 cd ISTR
-pip install -e .
+pip install -e detectron2 --no-build-isolation
+pip install -e . --no-build-isolation
 ```

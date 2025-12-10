@@ -7,12 +7,29 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "detectron2"
-version = "0.0.0"  # overwritten by setup.py get_version()
-description = "Detectron2"
+name = "istr"
+version = "1.0.0"
+description = "ISTR: End-to-End Instance Segmentation with Transformers"
 requires-python = ">=3.8"
-dynamic = ["dependencies"]
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [ { name = "ISTR Authors" } ]
+dependencies = [
+    "torch>=1.8",
+    "torchvision",
+    "opencv-python",
+    "scipy",
+    "shapely",
+    "torch_dct",
+    "timm",
+]
+optional-dependencies = { dev = ["black==22.3.0", "flake8", "isort"] }
 
 [tool.setuptools]
 include-package-data = true
-packages = { find = {} }
+
+[tool.setuptools.package-dir]
+"" = "projects/ISTR"
+
+[tool.setuptools.packages.find]
+where = ["projects/ISTR"]
+include = ["istr", "istr.*"]
