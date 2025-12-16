@@ -1,0 +1,93 @@
+# Model Evaluation Configuration
+# This file contains all configuration for the multi-model evaluation pipeline
+
+# Dataset definitions
+datasets:
+  yolo_normal:
+    path: "../shared/YOLODataset_big_images_rev"
+    format: "yolo"  # 'yolo' or 'coco'
+    description: "Big Images Rev (YOLO format)"
+  
+  yolo_contrast:
+    path: "../shared/YOLODataset_big_images_rev_contrast"
+    format: "yolo"
+    description: "Big Images Rev Contrast (YOLO format)"
+  
+  big-images-rev:
+    path: "../shared/coco-big-images-rev"
+    format: "coco"
+    description: "Big Images Rev (COCO format)"
+  
+  big-images-rev-contrast:
+    path: "../shared/coco-big-images-rev-contrast"
+    format: "coco"
+    description: "Big Images Rev Contrast (COCO format)"
+  
+  unlabeled:
+    path: "../shared/unlabeled_images"
+    format: "unlabeled"
+    description: "Unlabeled images for prediction only"
+
+# Model definitions
+models:
+  yolo_normal:
+    name: "YOLOv11n-seg"
+    run_name: "BIR"
+    type: "yolo"  # 'yolo' or 'detectron2'
+    weights: "../shared/n_bir.pt"
+    confidence: 0.5
+    epoch: "final"
+    evaluate_on: ["big-images-rev", "big-images-rev-contrast"]  # YOLO works with COCO format too for evaluation
+  
+  yolo_contrast:
+    name: "YOLOv11n-seg"
+    run_name: "BIRC"
+    type: "yolo"
+    weights: "../shared/n_birc.pt"
+    confidence: 0.5
+    epoch: "final"
+    evaluate_on: ["big-images-rev", "big-images-rev-contrast"]
+  
+  maskrcnn_normal:
+    name: "Mask R-CNN R50-FPN"
+    run_name: "maskrcnn_R_50_b16_big_images_rev_short"
+    type: "detectron2"
+    config: "detectron2/detectron2/model_zoo/configs/COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
+    weights: "../shared/models/output_maskrcnn_R_50_b16_big_images_rev_short/model_final.pth"
+    confidence: 0.5
+    epoch: "final"
+    evaluate_on: ["big-images-rev", "big-images-rev-contrast"]  # only COCO datasets
+  
+  maskrcnn_contrast:
+    name: "Mask R-CNN R50-FPN"
+    run_name: "maskrcnn_R_50_b16_aug_big_images_rev_contrast"  # Custom run description
+    type: "detectron2"
+    config: "detectron2/detectron2/model_zoo/configs/COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
+    weights: "../shared/models/output_maskrcnn_R_50_b16_aug_big_images_rev_contrast/model_final.pth"
+    confidence: 0.5
+    epoch: "final"
+    evaluate_on: ["big-images-rev", "big-images-rev-contrast"]
+  
+  istr_normal:
+    name: "ISTR-PCA-R50"
+    run_name: "pca_50_big-images-rev"
+    type: "istr"
+    config: "detectron2/detectron2/model_zoo/configs/ISTR/ISTR-PCA-R50-3x.yaml"
+    weights: "../shared/models/output_pca_50_big-images-rev/model_0019999.pth"
+    confidence: 0.5
+    epoch: "19999"
+    evaluate_on: ["big-images-rev", "big-images-rev-contrast"]
+  
+  istr_contrast:
+    name: "ISTR-PCA-R50"
+    run_name: "pca_50_big-images-rev-contrast"
+    type: "istr"
+    config: "detectron2/detectron2/model_zoo/configs/ISTR/ISTR-PCA-R50-3x.yaml"
+    weights: "../shared/models/output_pca_50_big-images-rev-contrast/model_0019999.pth"
+    confidence: 0.5
+    epoch: "19999"
+    evaluate_on: ["big-images-rev", "big-images-rev-contrast"]
+
+# Output configuration
+output_dir: "model_comparison_results"
+image_format: "png"
